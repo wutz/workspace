@@ -17,35 +17,54 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// InstanceTypeGPU describes the GPUs of an instance type.
+// InstanceTypeGPU describes the GPUs of an instance type. For CPU-only
+// instance types, Count is 0 and Class is "cpu".
 type InstanceTypeGPU struct {
-	// class is the normalised GPU product, e.g. rtx-5090. It is also the
-	// Kueue ResourceFlavor name.
+	// class is the normalised GPU product, e.g. rtx-5090, or "cpu" for CPU-only types.
+	// It is also the Kueue ResourceFlavor suffix.
 	Class string `json:"class"`
-	// product is the nvidia.com/gpu.product node label value.
-	Product string `json:"product"`
-	// count is the number of GPUs per worker.
+	// product is the nvidia.com/gpu.product node label value (empty for CPU-only).
+	// +optional
+	Product string `json:"product,omitempty"`
+	// count is the number of GPUs per worker (0 for CPU-only).
 	Count int32 `json:"count"`
 	// memoryMiB is the memory of one GPU.
 	// +optional
 	MemoryMiB int64 `json:"memoryMiB,omitempty"`
 }
 
-// InstanceTypeSpec is computed by the operator from the GPU nodes; it is not
-// meant to be edited.
+// InstanceTypeSpec is computed by the operator from the cluster nodes for
+// managed InstanceTypes, or statically declared by admins for unmanaged ones.
 type InstanceTypeSpec struct {
 	GPU InstanceTypeGPU `json:"gpu"`
 	// cpu and memory per worker: the per-GPU slice of the smallest node in
 	// the class (allocatable minus the platform reservation) times gpu.count.
 	CPU    resource.Quantity `json:"cpu"`
 	Memory resource.Quantity `json:"memory"`
-	// nodeSelector places workers on nodes of this class.
-	NodeSelector map[string]string `json:"nodeSelector"`
+	// shared marks an instance type derived for Shared ResourcePools (multiplexed dev sandboxes).
+	// +optional
+	Shared bool `json:"shared,omitempty"`
+	// sharedMemory is the recommended /dev/shm size for workloads using this instance type.
+	// +optional
+	SharedMemory *resource.Quantity `json:"sharedMemory,omitempty"`
+	// extendedResources lists extra hardware resources attached per worker (e.g. rdma/roce_gids).
+	// +optional
+	ExtendedResources corev1.ResourceList `json:"extendedResources,omitempty"`
+	// nodeSelector places workers on nodes matching this instance type.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// visibility controls which Projects may discover this instance type (Public or Restricted).
+	// +optional
+	Visibility ResourcePoolVisibility `json:"visibility,omitempty"`
+	// allowedProjects lists Project names permitted when visibility is Restricted.
+	// +optional
+	AllowedProjects []string `json:"allowedProjects,omitempty"`
 }
 
 // NodeAvailability is the capacity of one node for an instance type.

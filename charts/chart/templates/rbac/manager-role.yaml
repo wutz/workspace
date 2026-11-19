@@ -14,18 +14,9 @@ rules:
   - ""
   resources:
   - configmaps
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - limitranges
   - namespaces
+  - persistentvolumeclaims
   - resourcequotas
   - secrets
   - serviceaccounts
@@ -41,6 +32,15 @@ rules:
   - ""
   resources:
   - nodes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
@@ -54,41 +54,12 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - workspace.wutz.dev
-  resources:
-  - instancetypes
-  - projects
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - workspace.wutz.dev
-  resources:
-  - instancetypes/status
-  - projects/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - workspace.wutz.dev
-  resources:
-  - projects/finalizers
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
   - kueue.x-k8s.io
   resources:
   - clusterqueues
   - localqueues
   - resourceflavors
+  - workloadpriorityclasses
   verbs:
   - create
   - delete
@@ -126,3 +97,34 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - workspace.wutz.dev
+  resources:
+  - instancetypes
+  - projects
+  - resourcepools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.wutz.dev
+  resources:
+  - instancetypes/status
+  - projects/status
+  - resourcepools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.wutz.dev
+  resources:
+  - projects/finalizers
+  - resourcepools/finalizers
+  verbs:
+  - update

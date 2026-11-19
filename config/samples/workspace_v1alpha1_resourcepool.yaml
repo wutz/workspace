@@ -1,0 +1,54 @@
+apiVersion: workspace.wutz.dev/v1alpha1
+kind: ResourcePool
+metadata:
+  name: llm-exclusive
+spec:
+  displayName: LLM Exclusive Training Pool
+  mode: Exclusive
+  zone: cn-hangzhou-a
+  nodes:
+  - gpu-h100-01
+  - gpu-h100-02
+  allowedWorkloads:
+  - Sandbox
+  - TrainJob
+  - Inference
+  spotPolicy:
+    lendIdle: true
+    preemptible: true
+  accessControl:
+    mode: Restricted
+    allowedProjects:
+    - demo
+  rules:
+    idleShutdown:
+      enabled: true
+      idleMinutes: 60
+      gpuUtilizationThreshold: 5
+      cpuUtilizationThreshold: 5
+---
+apiVersion: workspace.wutz.dev/v1alpha1
+kind: ResourcePool
+metadata:
+  name: dev-shared
+spec:
+  displayName: Shared Sandbox Dev Pool
+  mode: Shared
+  zone: cn-hangzhou-a
+  nodes:
+  - gpu-shared-01
+  allowedWorkloads:
+  - Sandbox
+  sharing:
+    maxSandboxesPerNode: 16
+    perSandboxCPU: "8"
+    perSandboxMemory: 32Gi
+    perSandboxStorage: 200Gi
+  accessControl:
+    mode: Public
+  rules:
+    idleShutdown:
+      enabled: true
+      idleMinutes: 30
+      gpuUtilizationThreshold: 5
+      cpuUtilizationThreshold: 5

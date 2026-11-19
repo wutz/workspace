@@ -29,4 +29,12 @@ resources:
   kind: Project
   path: github.com/wutz/workspace/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+  controller: true
+  domain: wutz.dev
+  group: workspace
+  kind: ResourcePool
+  path: github.com/wutz/workspace/api/v1alpha1
+  version: v1alpha1
 version: "3"

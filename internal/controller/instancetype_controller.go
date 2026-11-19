@@ -62,6 +62,7 @@ type InstanceTypeReconciler struct {
 
 // +kubebuilder:rbac:groups=workspace.wutz.dev,resources=instancetypes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspace.wutz.dev,resources=instancetypes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=workspace.wutz.dev,resources=resourcepools,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes;pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=resourceflavors,verbs=get;list;watch;create;update;patch;delete
@@ -80,11 +81,15 @@ func (r *InstanceTypeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) 
 	if err := r.List(ctx, pods); err != nil {
 		return ctrl.Result{}, err
 	}
+	pools := &v1.ResourcePoolList{}
+	if err := r.List(ctx, pools); err != nil {
+		return ctrl.Result{}, err
+	}
 	now := time.Now
 	if r.Now != nil {
 		now = r.Now
 	}
-	classes, instances := instancetype.Compute(nodes.Items, pods.Items, cfg.InstanceTypes, metav1.NewTime(now()))
+	classes, instances := instancetype.ComputeAll(nodes.Items, pods.Items, pools.Items, cfg.InstanceTypes, metav1.NewTime(now()))
 
 	for _, c := range classes {
 		if !r.Kueue {
@@ -113,12 +118,18 @@ func (r *InstanceTypeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) 
 			cur.Status = v1.InstanceTypeStatus{}
 		} else if err != nil {
 			return ctrl.Result{}, err
-		} else if !equality.Semantic.DeepEqual(cur.Spec, it.Spec) || !maps.Equal(cur.Labels, it.Labels) {
-			cur.Spec, cur.Labels = it.Spec, it.Labels
-			if err := r.Update(ctx, cur); err != nil {
-				return ctrl.Result{}, err
+		} else {
+			// Protect static admin-declared InstanceTypes (without managed-by=workspace label).
+			if cur.Labels[naming.LabelManagedBy] != naming.ManagedBy {
+				continue
 			}
-			log.Info("Updated InstanceType", "name", it.Name)
+			if !equality.Semantic.DeepEqual(cur.Spec, it.Spec) || !maps.Equal(cur.Labels, it.Labels) {
+				cur.Spec, cur.Labels = it.Spec, it.Labels
+				if err := r.Update(ctx, cur); err != nil {
+					return ctrl.Result{}, err
+				}
+				log.Info("Updated InstanceType", "name", it.Name)
+			}
 		}
 		if statusChanged(cur.Status, it.Status) {
 			orig := cur.DeepCopy()
@@ -206,8 +217,9 @@ func (r *InstanceTypeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("instancetype").
 		Watches(&corev1.Node{}, all, builder.WithPredicates(nodeChanged)).
 		Watches(&corev1.Pod{}, all, builder.WithPredicates(podChanged)).
+		Watches(&v1.ResourcePool{}, all, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&v1.InstanceType{}, all, builder.WithPredicates(predicate.Funcs{
-			// Undo manual edits and deletions.
+			// Undo manual edits and deletions of managed instance types.
 			CreateFunc: func(event.CreateEvent) bool { return false },
 		})).
 		Watches(&corev1.ConfigMap{}, configChanged, builder.WithPredicates(isPlatformConfig)).

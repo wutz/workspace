@@ -93,6 +93,9 @@ type Registry struct {
 	Insecure bool `json:"insecure,omitempty"`
 	// AdminSecret in the platform namespace holds username and password.
 	AdminSecret string `json:"adminSecret,omitempty"`
+	// PublicProjects lists shared base-image Harbor projects (e.g. base-images)
+	// that every project robot receives read-only pull access to.
+	PublicProjects []string `json:"publicProjects,omitempty"`
 }
 
 // Enabled reports whether a registry is configured.
@@ -106,7 +109,14 @@ func (r Registry) APIURL() string {
 	return "https://" + r.Domain
 }
 
-// InstanceTypes controls how GPU nodes are sliced.
+// CPUSize defines one CPU-only InstanceType derived when CPU-only nodes exist
+// or configured explicitly.
+type CPUSize struct {
+	Cores  int32             `json:"cores"`
+	Memory resource.Quantity `json:"memory"`
+}
+
+// InstanceTypes controls how compute nodes are sliced.
 type InstanceTypes struct {
 	// Reserved is kept back on every node for the system before slicing.
 	Reserved struct {
@@ -115,6 +125,13 @@ type InstanceTypes struct {
 	} `json:"reserved"`
 	// Sizes are the GPU counts offered (capped at the GPUs per node).
 	Sizes []int32 `json:"sizes,omitempty"`
+	// CPUSizes lists optional CPU-only instance sizes (cores + memory) derived
+	// from schedulable non-GPU nodes (or all nodes if none are CPU-only).
+	CPUSizes []CPUSize `json:"cpuSizes,omitempty"`
+	// SharedMemoryPerGPU is the recommended /dev/shm slice per GPU.
+	SharedMemoryPerGPU *resource.Quantity `json:"sharedMemoryPerGPU,omitempty"`
+	// ExtendedResources lists optional per-GPU extended hardware resources (e.g. rdma/roce_gids).
+	ExtendedResources corev1.ResourceList `json:"extendedResources,omitempty"`
 }
 
 // Quota is the default project quota.
@@ -125,6 +142,9 @@ type Quota struct {
 	Storage resource.Quantity `json:"storage"`
 	Volumes int32             `json:"volumes,omitempty"`
 	Pods    int32             `json:"pods,omitempty"`
+	// RegistryStorage is the default Harbor project storage quota when a Project
+	// leaves spec.quota.registryStorage unset; nil means unlimited (-1).
+	RegistryStorage *resource.Quantity `json:"registryStorage,omitempty"`
 	// Headroom is CPU and memory allowed outside GPU jobs (helper pods),
 	// on top of the GPU-derived quota.
 	Headroom struct {
@@ -151,6 +171,58 @@ type Network struct {
 	// SandboxNamespace runs the agent-sandbox controller, which reaches the
 	// pods of a project and their sandboxes.
 	SandboxNamespace string `json:"sandboxNamespace,omitempty"`
+	// AllowedEgressNamespaces lists internal platform namespaces (e.g. Harbor,
+	// MinIO/S3, internal PyPI/HF mirrors) that remain reachable even when
+	// Project.Spec.Network.DenyInternet is true.
+	AllowedEgressNamespaces []string `json:"allowedEgressNamespaces,omitempty"`
+	// AllowedEgressCIDRs lists internal IP CIDR blocks (e.g. private registry,
+	// object storage, K8s API endpoints) allowed when denyInternet is true.
+	AllowedEgressCIDRs []string `json:"allowedEgressCIDRs,omitempty"`
+}
+
+// SharedVolumeConfig sets defaults for the per-project RWX shared volume.
+type SharedVolumeConfig struct {
+	// Enabled provisions a default workspace-shared RWX PVC in every project unless overridden.
+	Enabled bool `json:"enabled,omitempty"`
+	// StorageClassName is the RWX StorageClass used for shared volumes.
+	StorageClassName string `json:"storageClassName,omitempty"`
+	// DefaultSize is the requested size of workspace-shared when not overridden on the Project.
+	DefaultSize resource.Quantity `json:"defaultSize"`
+}
+
+// PublicDatasetConfig describes a platform-level read-only dataset or base model
+// volume that can be projected into authorized project namespaces.
+type PublicDatasetConfig struct {
+	Name             string   `json:"name"`
+	Description      string   `json:"description,omitempty"`
+	StorageClassName string   `json:"storageClassName,omitempty"`
+	VolumeHandle     string   `json:"volumeHandle,omitempty"`
+	Path             string   `json:"path,omitempty"`
+	DefaultMountPath string   `json:"defaultMountPath,omitempty"`
+	AllowedProjects  []string `json:"allowedProjects,omitempty"`
+}
+
+// Storage configures project shared volumes, public datasets and trash retention.
+type Storage struct {
+	SharedVolume          SharedVolumeConfig    `json:"sharedVolume"`
+	PublicDatasets        []PublicDatasetConfig `json:"publicDatasets,omitempty"`
+	DefaultTrashRetention string                `json:"defaultTrashRetention,omitempty"`
+}
+
+// SpotConfig configures platform defaults for preemptible Spot queues.
+type SpotConfig struct {
+	// DefaultMaxQueueDuration defaults to 4h (range 1h-12h).
+	DefaultMaxQueueDuration string `json:"defaultMaxQueueDuration,omitempty"`
+	// DefaultMaxRequeueCount defaults to 2 (range 0-3).
+	DefaultMaxRequeueCount *int32 `json:"defaultMaxRequeueCount,omitempty"`
+}
+
+// MaxRequeueCount returns the configured default or 2.
+func (s SpotConfig) MaxRequeueCount() int32 {
+	if s.DefaultMaxRequeueCount != nil {
+		return *s.DefaultMaxRequeueCount
+	}
+	return 2
 }
 
 // Config is the platform config the operator reads.
@@ -168,6 +240,8 @@ type Config struct {
 	InstanceTypes InstanceTypes `json:"instanceTypes"`
 	DefaultQuota  Quota         `json:"defaultQuota"`
 	Network       Network       `json:"network"`
+	Storage       Storage       `json:"storage"`
+	Spot          SpotConfig    `json:"spot"`
 }
 
 func defaultQuantity(q *resource.Quantity, v string) {
@@ -219,6 +293,13 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if c.Network.SandboxNamespace == "" {
 		c.Network.SandboxNamespace = "agent-sandbox-system"
+	}
+	defaultQuantity(&c.Storage.SharedVolume.DefaultSize, "100Gi")
+	if c.Storage.DefaultTrashRetention == "" {
+		c.Storage.DefaultTrashRetention = "168h"
+	}
+	if c.Spot.DefaultMaxQueueDuration == "" {
+		c.Spot.DefaultMaxQueueDuration = "4h"
 	}
 	return c, nil
 }

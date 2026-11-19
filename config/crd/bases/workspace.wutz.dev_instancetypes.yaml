@@ -64,6 +64,12 @@ spec:
           spec:
             description: spec defines the desired state of InstanceType
             properties:
+              allowedProjects:
+                description: allowedProjects lists Project names permitted when visibility
+                  is Restricted.
+                items:
+                  type: string
+                type: array
               cpu:
                 anyOf:
                 - type: integer
@@ -73,16 +79,28 @@ spec:
                   the class (allocatable minus the platform reservation) times gpu.count.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              extendedResources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: extendedResources lists extra hardware resources attached
+                  per worker (e.g. rdma/roce_gids).
+                type: object
               gpu:
-                description: InstanceTypeGPU describes the GPUs of an instance type.
+                description: |-
+                  InstanceTypeGPU describes the GPUs of an instance type. For CPU-only
+                  instance types, Count is 0 and Class is "cpu".
                 properties:
                   class:
                     description: |-
-                      class is the normalised GPU product, e.g. rtx-5090. It is also the
-                      Kueue ResourceFlavor name.
+                      class is the normalised GPU product, e.g. rtx-5090, or "cpu" for CPU-only types.
+                      It is also the Kueue ResourceFlavor suffix.
                     type: string
                   count:
-                    description: count is the number of GPUs per worker.
+                    description: count is the number of GPUs per worker (0 for CPU-only).
                     format: int32
                     type: integer
                   memoryMiB:
@@ -91,12 +109,11 @@ spec:
                     type: integer
                   product:
                     description: product is the nvidia.com/gpu.product node label
-                      value.
+                      value (empty for CPU-only).
                     type: string
                 required:
                 - class
                 - count
-                - product
                 type: object
               memory:
                 anyOf:
@@ -107,13 +124,32 @@ spec:
               nodeSelector:
                 additionalProperties:
                   type: string
-                description: nodeSelector places workers on nodes of this class.
+                description: nodeSelector places workers on nodes matching this instance
+                  type.
                 type: object
+              shared:
+                description: shared marks an instance type derived for Shared ResourcePools
+                  (multiplexed dev sandboxes).
+                type: boolean
+              sharedMemory:
+                anyOf:
+                - type: integer
+                - type: string
+                description: sharedMemory is the recommended /dev/shm size for workloads
+                  using this instance type.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              visibility:
+                description: visibility controls which Projects may discover this
+                  instance type (Public or Restricted).
+                enum:
+                - Public
+                - Restricted
+                type: string
             required:
             - cpu
             - gpu
             - memory
-            - nodeSelector
             type: object
           status:
             description: status defines the observed state of InstanceType

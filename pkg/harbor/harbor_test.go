@@ -139,3 +139,23 @@ func TestDeleteTag(t *testing.T) {
 		t.Fatalf("after last tag delete %+v %v", arts, err)
 	}
 }
+
+func TestEnsureRobotWithReadProjects(t *testing.T) {
+	ctx := context.Background()
+	srv := harbortest.New("admin", "pw")
+	defer srv.Close()
+	c := harbor.New(srv.URL, "admin", "pw", true)
+
+	p, err := c.EnsureProject(ctx, "project-demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := c.EnsureRobotWithReadProjects(ctx, p, harbor.RobotName, "Secret1234", []string{"base-images", "public-models"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := srv.RobotReadProjects(name)
+	if len(got) != 2 || got[0] != "base-images" || got[1] != "public-models" {
+		t.Fatalf("read projects = %+v", got)
+	}
+}

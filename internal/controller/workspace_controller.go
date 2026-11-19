@@ -47,6 +47,7 @@ import (
 	v1 "github.com/wutz/workspace/api/v1alpha1"
 	"github.com/wutz/workspace/pkg/instancetype"
 	"github.com/wutz/workspace/pkg/kf"
+	"github.com/wutz/workspace/pkg/metrics"
 	"github.com/wutz/workspace/pkg/naming"
 	"github.com/wutz/workspace/pkg/platform"
 	"github.com/wutz/workspace/pkg/sandbox"
@@ -60,10 +61,27 @@ const (
 	verbGet          = "get"
 	verbWatch        = "watch"
 	verbList         = "list"
+
+	// Kueue and unstructured field names shared by the queue builders.
+	keyResources         = "resources"
+	keyCPU               = "cpu"
+	keyMemory            = "memory"
+	keyCoveredResources  = "coveredResources"
+	keyFlavors           = "flavors"
+	keyResourceGroups    = "resourceGroups"
+	keyOwnerReferences   = "ownerReferences"
+	keyMatchLabels       = "matchLabels"
+	keyBorrowingLimit    = "borrowingLimit"
+	keyCohortName        = "cohortName"
+	keyNamespaceSelector = "namespaceSelector"
+	keyQueueingStrategy  = "queueingStrategy"
+	keyUseValue          = "value"
+	queueingBestEffort   = "BestEffortFIFO"
+	valueTrue            = "true"
 )
 
 // ProjectReconciler turns a Project into a labelled namespace with quota,
-// network isolation, a Kueue queue and member credentials.
+// network isolation, pool-scoped Kueue queues, shared storage and member credentials.
 type ProjectReconciler struct {
 	client.Client
 	// APIReader reads objects outside the label-filtered cache.
@@ -78,13 +96,12 @@ type ProjectReconciler struct {
 // +kubebuilder:rbac:groups=workspace.wutz.dev,resources=projects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspace.wutz.dev,resources=projects/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.wutz.dev,resources=projects/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts;secrets;resourcequotas;limitranges,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts;secrets;resourcequotas;limitranges;persistentvolumeclaims;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;bind;escalate
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=clusterqueues;localqueues,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=resourceflavors,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=workspace.wutz.dev,resources=instancetypes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=workspace.wutz.dev,resources=instancetypes;resourcepools,verbs=get;list;watch
 // The member roles bound by the operator (it may only grant what it holds):
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=selfsubjectaccessreviews;selfsubjectrulesreviews,verbs=create
 
@@ -108,6 +125,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 		}
+		metrics.DeleteProject(p.Name)
 		controllerutil.RemoveFinalizer(p, projectFinalizer)
 		return ctrl.Result{}, r.Update(ctx, p)
 	}
@@ -121,24 +139,33 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	p.Status.Namespace = ns
 	p.Status.ObservedGeneration = p.Generation
 	if err := r.reconcileProject(ctx, p, cfg, ns); err != nil {
+		metrics.ObserveProject(p.Name, false, nil)
 		if _, ok := errors.AsType[*namespaceConflictError](err); ok {
-			setCondition(p, v1.ConditionReady, metav1.ConditionFalse, "NamespaceConflict", err.Error())
+			setCondition(p, metav1.ConditionFalse, "NamespaceConflict", err.Error())
 			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 		}
-		setCondition(p, v1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
+		if pae, ok := errors.AsType[*poolAccessError](err); ok {
+			setCondition(p, metav1.ConditionFalse, pae.reason, pae.Error())
+			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
+		}
+		if dae, ok := errors.AsType[*datasetAccessError](err); ok {
+			setCondition(p, metav1.ConditionFalse, dae.reason, dae.Error())
+			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
+		}
+		setCondition(p, metav1.ConditionFalse, "ReconcileError", err.Error())
 		_ = r.Status().Patch(ctx, p, statusPatch(orig))
 		return ctrl.Result{}, err
 	}
-	setCondition(p, v1.ConditionReady, metav1.ConditionTrue, "Ready", "")
+	setCondition(p, metav1.ConditionTrue, "Ready", "")
 	if !meta.IsStatusConditionTrue(orig.Status.Conditions, v1.ConditionReady) {
 		log.Info("Project is ready", "namespace", ns)
 	}
 	return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 }
 
-func setCondition(p *v1.Project, t string, s metav1.ConditionStatus, reason, msg string) {
+func setCondition(p *v1.Project, s metav1.ConditionStatus, reason, msg string) {
 	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
-		Type: t, Status: s, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
+		Type: v1.ConditionReady, Status: s, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
 	})
 }
 
@@ -193,10 +220,18 @@ func (r *ProjectReconciler) dropStaleRoleBinding(ctx context.Context, name, ns s
 }
 
 func (r *ProjectReconciler) reconcileProject(ctx context.Context, p *v1.Project, cfg *platform.Config, ns string) error {
-	if err := r.ensureNamespace(ctx, p, ns); err != nil {
+	if err := r.ensureNamespace(ctx, p, cfg, ns); err != nil {
 		return err
 	}
 	classes, err := r.gpuClasses(ctx)
+	if err != nil {
+		return err
+	}
+	pools, poolNames, err := r.listPools(ctx)
+	if err != nil {
+		return err
+	}
+	qRes, err := r.reconcileQueues(ctx, p, cfg, ns, classes, pools, poolNames)
 	if err != nil {
 		return err
 	}
@@ -205,9 +240,6 @@ func (r *ProjectReconciler) reconcileProject(ctx context.Context, p *v1.Project,
 		return err
 	}
 	objs := []client.Object{platformConfig, resourceQuota(p, cfg, ns, classes), limitRange(p, ns)}
-	if r.Kueue {
-		objs = append(objs, localQueue(p, ns))
-	}
 	if np := networkPolicy(p, cfg, ns); np != nil {
 		objs = append(objs, np)
 	}
@@ -223,20 +255,30 @@ func (r *ProjectReconciler) reconcileProject(ctx context.Context, p *v1.Project,
 			return err
 		}
 	}
-	if r.Kueue {
-		if err := apply(ctx, r.Client, cpuResourceFlavor()); err != nil {
-			return fmt.Errorf("apply CPU ResourceFlavor: %w", err)
-		}
-		if err := apply(ctx, r.Client, clusterQueue(p, cfg, ns, classes)); err != nil {
-			return fmt.Errorf("apply ClusterQueue: %w", err)
-		}
-		p.Status.ClusterQueue = naming.ClusterQueue(ns)
-		p.Status.LocalQueue = naming.LocalQueueName
+
+	sharedVol, err := r.reconcileSharedVolume(ctx, p, cfg, ns)
+	if err != nil {
+		return err
 	}
-	return r.reconcileMembers(ctx, p, cfg, ns)
+	datasets, err := r.reconcilePublicDatasets(ctx, p, cfg, ns)
+	if err != nil {
+		return err
+	}
+
+	p.Status.ClusterQueue = qRes.defaultCQ
+	p.Status.LocalQueue = qRes.defaultLQ
+	p.Status.Queues = qRes.queues
+	p.Status.SharedVolume = sharedVol
+	p.Status.Datasets = datasets
+
+	if err := r.reconcileMembers(ctx, p, cfg, ns, qRes.clusterQueues, qRes.authorizedPools); err != nil {
+		return err
+	}
+	metrics.ObserveProject(p.Name, true, qRes.gpuQuotasByPool)
+	return nil
 }
 
-func (r *ProjectReconciler) ensureNamespace(ctx context.Context, p *v1.Project, ns string) error {
+func (r *ProjectReconciler) ensureNamespace(ctx context.Context, p *v1.Project, cfg *platform.Config, ns string) error {
 	cur := &corev1.Namespace{}
 	err := r.APIReader.Get(ctx, types.NamespacedName{Name: ns}, cur)
 	if err == nil && cur.Labels[naming.LabelProject] != p.Name {
@@ -250,8 +292,12 @@ func (r *ProjectReconciler) ensureNamespace(ctx context.Context, p *v1.Project, 
 	labels["pod-security.kubernetes.io/enforce"] = "baseline"
 	labels["pod-security.kubernetes.io/warn"] = "restricted"
 	return apply(ctx, r.Client, &corev1.Namespace{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{Name: ns, Labels: labels},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ns,
+			Labels:      labels,
+			Annotations: map[string]string{naming.AnnotationTrashRetention: trashRetentionValue(p, cfg)},
+		},
 	})
 }
 
@@ -281,6 +327,10 @@ func (r *ProjectReconciler) gpuClasses(ctx context.Context) ([]instancetype.Clas
 	}
 	byName := map[string]*instancetype.Class{}
 	for _, it := range list.Items {
+		shared, _, _ := unstructured.NestedBool(it.Object, "spec", "shared")
+		if shared {
+			continue
+		}
 		class, _, _ := unstructured.NestedString(it.Object, "spec", "gpu", "class")
 		product, _, _ := unstructured.NestedString(it.Object, "spec", "gpu", "product")
 		count, _, _ := unstructured.NestedInt64(it.Object, "spec", "gpu", "count")
@@ -325,6 +375,41 @@ func gpuQuota(p *v1.Project, cfg *platform.Config, class string) int64 {
 	return int64(cfg.DefaultQuota.GPUCount(class))
 }
 
+func totalProjectGPUs(p *v1.Project, cfg *platform.Config, classes []instancetype.Class) (gpus, milliCPU, mem int64) {
+	byClass := classMap(classes)
+	if len(p.Spec.PoolQuotas) == 0 {
+		for _, c := range classes {
+			n := gpuQuota(p, cfg, c.Name)
+			gpus += n
+			milliCPU += n * c.MilliCPU
+			mem += n * c.Memory
+		}
+	} else {
+		for _, pq := range p.Spec.PoolQuotas {
+			for _, g := range pq.GPUs {
+				n := int64(g.Count)
+				if pq.BorrowingLimit != nil {
+					n += int64(*pq.BorrowingLimit)
+				}
+				c := byClass[g.Class]
+				gpus += n
+				milliCPU += n * c.MilliCPU
+				mem += n * c.Memory
+			}
+		}
+	}
+	if p.Spec.Spot != nil && p.Spec.Spot.Enabled {
+		for _, g := range p.Spec.Spot.GPUs {
+			n := int64(g.Count)
+			c := byClass[g.Class]
+			gpus += n
+			milliCPU += n * c.MilliCPU
+			mem += n * c.Memory
+		}
+	}
+	return gpus, milliCPU, mem
+}
+
 func resourceQuota(p *v1.Project, cfg *platform.Config, ns string, classes []instancetype.Class) *corev1.ResourceQuota {
 	q := p.Spec.Quota
 	storage := cfg.DefaultQuota.Storage
@@ -340,26 +425,39 @@ func resourceQuota(p *v1.Project, cfg *platform.Config, ns string, classes []ins
 	}
 	// GPU jobs are admitted by Kueue; the ResourceQuota is the backstop for
 	// workloads that bypass the queue, so it covers the same totals plus headroom.
-	var gpus, milliCPU, mem int64
-	for _, c := range classes {
-		n := gpuQuota(p, cfg, c.Name)
-		gpus += n
-		milliCPU += n * c.MilliCPU
-		mem += n * c.Memory
-	}
+	gpus, milliCPU, mem := totalProjectGPUs(p, cfg, classes)
 	milliCPU += cfg.DefaultQuota.Headroom.CPU.MilliValue()
 	mem += cfg.DefaultQuota.Headroom.Memory.Value()
+
+	hard := corev1.ResourceList{
+		corev1.ResourceRequestsStorage:         storage,
+		corev1.ResourcePersistentVolumeClaims:  *resource.NewQuantity(int64(volumes), resource.DecimalSI),
+		corev1.ResourcePods:                    *resource.NewQuantity(int64(pods), resource.DecimalSI),
+		corev1.ResourceRequestsCPU:             *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
+		corev1.ResourceRequestsMemory:          *resource.NewQuantity(mem, resource.BinarySI),
+		"requests." + instancetype.ResourceGPU: *resource.NewQuantity(gpus, resource.DecimalSI),
+	}
+	for _, scq := range q.StorageClasses {
+		prefix := scq.StorageClassName + ".storageclass.storage.k8s.io/"
+		if scq.Storage != nil {
+			hard[corev1.ResourceName(prefix+"requests.storage")] = scq.Storage.DeepCopy()
+		}
+		if scq.Volumes != nil {
+			hard[corev1.ResourceName(prefix+"persistentvolumeclaims")] = *resource.NewQuantity(int64(*scq.Volumes), resource.DecimalSI)
+		}
+	}
+	for resName, qty := range q.ExtendedResources {
+		key := resName
+		if !strings.HasPrefix(string(resName), "requests.") {
+			key = "requests." + resName
+		}
+		hard[key] = qty.DeepCopy()
+	}
+
 	return &corev1.ResourceQuota{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ResourceQuota"},
 		ObjectMeta: metav1.ObjectMeta{Name: naming.ResourceQuotaName, Namespace: ns, Labels: projectLabels(p)},
-		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
-			corev1.ResourceRequestsStorage:         storage,
-			corev1.ResourcePersistentVolumeClaims:  *resource.NewQuantity(int64(volumes), resource.DecimalSI),
-			corev1.ResourcePods:                    *resource.NewQuantity(int64(pods), resource.DecimalSI),
-			corev1.ResourceRequestsCPU:             *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
-			corev1.ResourceRequestsMemory:          *resource.NewQuantity(mem, resource.BinarySI),
-			"requests." + instancetype.ResourceGPU: *resource.NewQuantity(gpus, resource.DecimalSI),
-		}},
+		Spec:       corev1.ResourceQuotaSpec{Hard: hard},
 	}
 }
 
@@ -389,7 +487,8 @@ func nsPeer(name string) networkingv1.NetworkPolicyPeer {
 }
 
 // networkPolicy admits traffic from the same namespace and the platform
-// namespaces only. With denyInternet, egress is limited to the namespace and DNS.
+// namespaces only. With denyInternet, egress is limited to the namespace,
+// DNS and configured internal platform allowlists (namespaces and CIDRs).
 func networkPolicy(p *v1.Project, cfg *platform.Config, ns string) *networkingv1.NetworkPolicy {
 	if p.Spec.Network.Isolation == v1.NetworkNone {
 		return nil
@@ -421,8 +520,21 @@ func networkPolicy(p *v1.Project, cfg *platform.Config, ns string) *networkingv1
 		udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
 		dns := intstr.FromInt32(53)
 		np.Spec.PolicyTypes = append(np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress)
+		egressTo := []networkingv1.NetworkPolicyPeer{same, agents}
+		for _, allowedNS := range cfg.Network.AllowedEgressNamespaces {
+			if allowedNS != "" {
+				egressTo = append(egressTo, nsPeer(allowedNS))
+			}
+		}
+		for _, cidr := range cfg.Network.AllowedEgressCIDRs {
+			if cidr != "" {
+				egressTo = append(egressTo, networkingv1.NetworkPolicyPeer{
+					IPBlock: &networkingv1.IPBlock{CIDR: cidr},
+				})
+			}
+		}
 		np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{
-			{To: []networkingv1.NetworkPolicyPeer{same, agents}},
+			{To: egressTo},
 			{
 				To:    []networkingv1.NetworkPolicyPeer{nsPeer(cfg.Network.DNSNamespace)},
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: &dns}, {Protocol: &tcp, Port: &dns}},
@@ -430,15 +542,6 @@ func networkPolicy(p *v1.Project, cfg *platform.Config, ns string) *networkingv1
 		}
 	}
 	return np
-}
-
-func localQueue(p *v1.Project, ns string) *unstructured.Unstructured {
-	u := &unstructured.Unstructured{Object: map[string]any{
-		naming.KeyMetadata: map[string]any{naming.KeyName: naming.LocalQueueName, naming.KeyNamespace: ns, naming.KeyLabels: toAny(projectLabels(p))},
-		naming.KeySpec:     map[string]any{"clusterQueue": naming.ClusterQueue(ns)},
-	}}
-	u.SetGroupVersionKind(kf.LocalQueueGVK)
-	return u
 }
 
 func toAny(m map[string]string) map[string]any {
@@ -468,18 +571,19 @@ func cpuResourceFlavor() *unstructured.Unstructured {
 func flavor(name string, milliCPU, memory, gpus int64) map[string]any {
 	return map[string]any{
 		naming.KeyName: name,
-		"resources": []any{
-			map[string]any{naming.KeyName: "cpu", keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
-			map[string]any{naming.KeyName: "memory", keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
+		keyResources: []any{
+			map[string]any{naming.KeyName: keyCPU, keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
+			map[string]any{naming.KeyName: keyMemory, keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
 			map[string]any{naming.KeyName: string(instancetype.ResourceGPU), keyNominalQuota: fmt.Sprint(gpus)},
 		},
 	}
 }
 
-// clusterQueue is the project's Kueue ClusterQueue: one ResourceFlavor per
-// GPU class, with CPU and memory quota following the per-GPU slice. The CPU
-// flavor comes last and holds the headroom, so workloads without a GPU are
-// admitted even when the project has no GPU quota or the cluster has no GPUs.
+// clusterQueue is the project's legacy/default Kueue ClusterQueue: one
+// ResourceFlavor per GPU class, with CPU and memory quota following the per-GPU
+// slice. The CPU flavor comes last and holds the headroom, so workloads without
+// a GPU are admitted even when the project has no GPU quota or the cluster has
+// no GPUs.
 func clusterQueue(p *v1.Project, cfg *platform.Config, ns string, classes []instancetype.Class) *unstructured.Unstructured {
 	flavors := make([]any, 0, len(classes)+1)
 	for _, c := range classes {
@@ -489,18 +593,18 @@ func clusterQueue(p *v1.Project, cfg *platform.Config, ns string, classes []inst
 	headroom := cfg.DefaultQuota.Headroom
 	flavors = append(flavors, flavor(naming.ResourceFlavor(cpuFlavor), headroom.CPU.MilliValue(), headroom.Memory.Value(), 0))
 	groups := []any{map[string]any{
-		"coveredResources": []any{"cpu", "memory", string(instancetype.ResourceGPU)},
-		"flavors":          flavors,
+		keyCoveredResources: []any{keyCPU, keyMemory, string(instancetype.ResourceGPU)},
+		keyFlavors:          flavors,
 	}}
 	u := &unstructured.Unstructured{Object: map[string]any{
 		naming.KeyMetadata: map[string]any{
 			naming.KeyName: naming.ClusterQueue(ns), naming.KeyLabels: toAny(projectLabels(p)),
-			"ownerReferences": []any{ownerRef(p)},
+			keyOwnerReferences: []any{ownerRef(p)},
 		},
-		"spec": map[string]any{
-			"namespaceSelector": map[string]any{"matchLabels": map[string]any{corev1.LabelMetadataName: ns}},
-			"queueingStrategy":  "BestEffortFIFO",
-			"resourceGroups":    groups,
+		naming.KeySpec: map[string]any{
+			keyNamespaceSelector: map[string]any{keyMatchLabels: map[string]any{corev1.LabelMetadataName: ns}},
+			keyQueueingStrategy:  queueingBestEffort,
+			keyResourceGroups:    groups,
 		},
 	}}
 	u.SetGroupVersionKind(kf.ClusterQueueGVK)
@@ -521,9 +625,14 @@ func ownerRefs(p *v1.Project) []metav1.OwnerReference {
 	}}
 }
 
-// reconcileMembers creates a ServiceAccount, a long-lived token and a role
-// binding per member, and prunes removed members.
-func (r *ProjectReconciler) reconcileMembers(ctx context.Context, p *v1.Project, cfg *platform.Config, ns string) error {
+// reconcileMembers creates ServiceAccounts/tokens (for ServiceAccount members),
+// binds RBAC roles (for ServiceAccount, OIDC User and Group members), scopes
+// ClusterRole read access to authorized ResourcePools and ClusterQueues, and
+// prunes removed members.
+func (r *ProjectReconciler) reconcileMembers(
+	ctx context.Context, p *v1.Project, cfg *platform.Config, ns string,
+	clusterQueues, authorizedPools []string,
+) error {
 	mns := cfg.MembersNamespace
 	if err := apply(ctx, r.Client, &corev1.Namespace{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
@@ -535,7 +644,8 @@ func (r *ProjectReconciler) reconcileMembers(ctx context.Context, p *v1.Project,
 	}
 
 	labels := projectLabels(p)
-	want := map[string]bool{}
+	wantSA := map[string]bool{}
+	wantRB := map[string]bool{}
 	subjects := []rbacv1.Subject{}
 	status := []v1.MemberStatus{}
 	for _, m := range p.Spec.Members {
@@ -543,61 +653,99 @@ func (r *ProjectReconciler) reconcileMembers(ctx context.Context, p *v1.Project,
 		if role == "" {
 			role = v1.RoleEdit
 		}
-		sa := naming.MemberServiceAccount(p.Name, m.Name)
-		want[sa] = true
+		kind := m.Kind
+		if kind == "" {
+			kind = v1.MemberServiceAccount
+		}
+		rbName := naming.MemberRoleBinding(m.Name)
+		wantRB[rbName] = true
 		ml := projectLabels(p)
-		ml[naming.LabelMember] = m.Name
+		if kind == v1.MemberServiceAccount {
+			ml[naming.LabelMember] = m.Name
+		}
 		roleRef := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: naming.ClusterRolePrefix + string(role)}
-		if err := r.dropStaleRoleBinding(ctx, naming.MemberRoleBinding(m.Name), ns, roleRef); err != nil {
+		if err := r.dropStaleRoleBinding(ctx, rbName, ns, roleRef); err != nil {
 			return fmt.Errorf("member %s: %w", m.Name, err)
 		}
-		objs := []client.Object{
-			&corev1.ServiceAccount{
-				TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-				ObjectMeta: metav1.ObjectMeta{Name: sa, Namespace: mns, Labels: ml, OwnerReferences: ownerRefs(p)},
-				// Member tokens are only used from outside the cluster.
-				AutomountServiceAccountToken: new(false),
-			},
-			&corev1.Secret{
-				TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "Secret"},
-				ObjectMeta: metav1.ObjectMeta{
-					Name: naming.MemberTokenSecret(p.Name, m.Name), Namespace: mns, Labels: ml,
-					Annotations: map[string]string{corev1.ServiceAccountNameKey: sa},
+
+		var subject rbacv1.Subject
+		var objs []client.Object
+		ms := v1.MemberStatus{Name: m.Name, Kind: kind}
+
+		switch kind {
+		case v1.MemberUser:
+			subject = rbacv1.Subject{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: m.Name}
+		case v1.MemberGroup:
+			subject = rbacv1.Subject{APIGroup: rbacv1.GroupName, Kind: rbacv1.GroupKind, Name: m.Name}
+		default:
+			sa := naming.MemberServiceAccount(p.Name, m.Name)
+			wantSA[sa] = true
+			subject = rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: sa, Namespace: mns}
+			objs = append(objs,
+				&corev1.ServiceAccount{
+					TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+					ObjectMeta: metav1.ObjectMeta{Name: sa, Namespace: mns, Labels: ml, OwnerReferences: ownerRefs(p)},
+					// Member tokens are only used from outside the cluster.
+					AutomountServiceAccountToken: new(false),
 				},
-				Type: corev1.SecretTypeServiceAccountToken,
-			},
-			&rbacv1.RoleBinding{
-				TypeMeta:   metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "RoleBinding"},
-				ObjectMeta: metav1.ObjectMeta{Name: naming.MemberRoleBinding(m.Name), Namespace: ns, Labels: ml, OwnerReferences: ownerRefs(p)},
-				RoleRef:    roleRef,
-				Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: sa, Namespace: mns}},
-			},
+				&corev1.Secret{
+					TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "Secret"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: naming.MemberTokenSecret(p.Name, m.Name), Namespace: mns, Labels: ml,
+						Annotations: map[string]string{corev1.ServiceAccountNameKey: sa},
+					},
+					Type: corev1.SecretTypeServiceAccountToken,
+				},
+			)
+			ms.Namespace = mns
+			ms.ServiceAccount = sa
+			ms.TokenSecret = naming.MemberTokenSecret(p.Name, m.Name)
 		}
+
+		objs = append(objs, &rbacv1.RoleBinding{
+			TypeMeta:   metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "RoleBinding"},
+			ObjectMeta: metav1.ObjectMeta{Name: rbName, Namespace: ns, Labels: ml, OwnerReferences: ownerRefs(p)},
+			RoleRef:    roleRef,
+			Subjects:   []rbacv1.Subject{subject},
+		})
 		for _, o := range objs {
 			if err := apply(ctx, r.Client, o); err != nil {
 				return fmt.Errorf("member %s: %w", m.Name, err)
 			}
 		}
-		subjects = append(subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: sa, Namespace: mns})
-		status = append(status, v1.MemberStatus{
-			Name: m.Name, Namespace: mns, ServiceAccount: sa, TokenSecret: naming.MemberTokenSecret(p.Name, m.Name),
-		})
+		subjects = append(subjects, subject)
+		status = append(status, ms)
 	}
 	p.Status.Members = status
+
+	cqNames := clusterQueues
+	if len(cqNames) == 0 {
+		cqNames = []string{naming.ClusterQueue(ns)}
+	}
+	rules := []rbacv1.PolicyRule{
+		{APIGroups: []string{v1.GroupVersion.Group}, Resources: []string{"projects"}, ResourceNames: []string{p.Name}, Verbs: []string{verbGet, verbWatch}},
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, ResourceNames: []string{ns}, Verbs: []string{verbGet}},
+		{APIGroups: []string{"kueue.x-k8s.io"}, Resources: []string{"clusterqueues"}, ResourceNames: cqNames, Verbs: []string{verbGet, verbWatch}},
+		{APIGroups: []string{v1.GroupVersion.Group}, Resources: []string{"instancetypes"}, Verbs: []string{verbGet, verbList, verbWatch}},
+		{APIGroups: []string{kf.Group}, Resources: []string{"clustertrainingruntimes"}, Verbs: []string{verbGet, verbList, verbWatch}},
+		{APIGroups: []string{sandbox.Group}, Resources: []string{"sandboxes"}, Verbs: []string{verbGet, verbList, verbWatch}},
+		{APIGroups: []string{"authorization.k8s.io"}, Resources: []string{"selfsubjectaccessreviews", "selfsubjectrulesreviews"}, Verbs: []string{"create"}},
+	}
+	// Scope ResourcePool visibility strictly to pools this project is authorized to use.
+	if len(authorizedPools) > 0 {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups:     []string{v1.GroupVersion.Group},
+			Resources:     []string{"resourcepools"},
+			ResourceNames: authorizedPools,
+			Verbs:         []string{verbGet, verbWatch},
+		})
+	}
 
 	role := naming.ProjectClusterRole(p.Name)
 	if err := apply(ctx, r.Client, &rbacv1.ClusterRole{
 		TypeMeta:   metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"},
 		ObjectMeta: metav1.ObjectMeta{Name: role, Labels: labels, OwnerReferences: ownerRefs(p)},
-		Rules: []rbacv1.PolicyRule{
-			{APIGroups: []string{v1.GroupVersion.Group}, Resources: []string{"projects"}, ResourceNames: []string{p.Name}, Verbs: []string{verbGet, verbWatch}},
-			{APIGroups: []string{""}, Resources: []string{"namespaces"}, ResourceNames: []string{ns}, Verbs: []string{verbGet}},
-			{APIGroups: []string{"kueue.x-k8s.io"}, Resources: []string{"clusterqueues"}, ResourceNames: []string{naming.ClusterQueue(ns)}, Verbs: []string{verbGet, verbWatch}},
-			{APIGroups: []string{v1.GroupVersion.Group}, Resources: []string{"instancetypes"}, Verbs: []string{verbGet, verbList, verbWatch}},
-			{APIGroups: []string{kf.Group}, Resources: []string{"clustertrainingruntimes"}, Verbs: []string{verbGet, verbList, verbWatch}},
-			{APIGroups: []string{sandbox.Group}, Resources: []string{"sandboxes"}, Verbs: []string{verbGet, verbList, verbWatch}},
-			{APIGroups: []string{"authorization.k8s.io"}, Resources: []string{"selfsubjectaccessreviews", "selfsubjectrulesreviews"}, Verbs: []string{"create"}},
-		},
+		Rules:      rules,
 	}); err != nil {
 		return err
 	}
@@ -609,17 +757,19 @@ func (r *ProjectReconciler) reconcileMembers(ctx context.Context, p *v1.Project,
 	}); err != nil {
 		return err
 	}
-	return r.pruneMembers(ctx, p, mns, ns, want)
+	return r.pruneMembers(ctx, p, mns, ns, wantSA, wantRB)
 }
 
-func (r *ProjectReconciler) pruneMembers(ctx context.Context, p *v1.Project, mns, ns string, want map[string]bool) error {
+func (r *ProjectReconciler) pruneMembers(
+	ctx context.Context, p *v1.Project, mns, ns string, wantSA, wantRB map[string]bool,
+) error {
 	sel := client.MatchingLabels{naming.LabelProject: p.Name}
 	sas := &corev1.ServiceAccountList{}
 	if err := r.List(ctx, sas, client.InNamespace(mns), sel); err != nil {
 		return err
 	}
 	for i := range sas.Items {
-		if !want[sas.Items[i].Name] {
+		if !wantSA[sas.Items[i].Name] {
 			// Deleting the ServiceAccount invalidates its token Secret.
 			if err := client.IgnoreNotFound(r.Delete(ctx, &sas.Items[i])); err != nil {
 				return err
@@ -631,7 +781,7 @@ func (r *ProjectReconciler) pruneMembers(ctx context.Context, p *v1.Project, mns
 		return err
 	}
 	for i := range secrets.Items {
-		if !want[secrets.Items[i].Annotations[corev1.ServiceAccountNameKey]] {
+		if !wantSA[secrets.Items[i].Annotations[corev1.ServiceAccountNameKey]] {
 			if err := client.IgnoreNotFound(r.Delete(ctx, &secrets.Items[i])); err != nil {
 				return err
 			}
@@ -642,8 +792,7 @@ func (r *ProjectReconciler) pruneMembers(ctx context.Context, p *v1.Project, mns
 		return err
 	}
 	for i := range rbs.Items {
-		m := rbs.Items[i].Labels[naming.LabelMember]
-		if m != "" && !want[naming.MemberServiceAccount(p.Name, m)] {
+		if !wantRB[rbs.Items[i].Name] {
 			if err := client.IgnoreNotFound(r.Delete(ctx, &rbs.Items[i])); err != nil {
 				return err
 			}
@@ -656,21 +805,20 @@ func (r *ProjectReconciler) pruneMembers(ctx context.Context, p *v1.Project, mns
 // the namespace. It reports whether cleanup is complete.
 func (r *ProjectReconciler) finalize(ctx context.Context, p *v1.Project, cfg *platform.Config, ns string) (bool, error) {
 	log := logf.FromContext(ctx)
-	if err := r.pruneMembers(ctx, p, cfg.MembersNamespace, ns, map[string]bool{}); err != nil {
+	if err := r.pruneMembers(ctx, p, cfg.MembersNamespace, ns, map[string]bool{}, map[string]bool{}); err != nil {
 		return false, err
 	}
 	role := naming.ProjectClusterRole(p.Name)
-	cq := &unstructured.Unstructured{}
-	cq.SetGroupVersionKind(kf.ClusterQueueGVK)
-	cq.SetName(naming.ClusterQueue(ns))
 	for _, o := range []client.Object{
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: role}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: role}},
-		cq,
 	} {
 		if err := r.Delete(ctx, o); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			return false, err
 		}
+	}
+	if err := r.deleteAllProjectClusterQueues(ctx, p, ns); err != nil {
+		return false, err
 	}
 	if p.Spec.DeletionPolicy != v1.DeletionDelete {
 		return true, nil
@@ -746,6 +894,8 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return b.
 		// Quotas follow the GPU classes and their slices.
 		Watches(instanceTypeObject(), allProjects, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Pool access control, mode, spot policy and rules affect project queues and RBAC.
+		Watches(&v1.ResourcePool{}, allProjects, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Project namespaces carry a copy of the platform config.
 		Watches(&corev1.ConfigMap{}, platformConfigChanged, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 			return o.GetNamespace() == r.Config.Namespace && o.GetName() == platform.ConfigMapName

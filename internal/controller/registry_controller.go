@@ -155,6 +155,8 @@ func (r *RegistryReconciler) reconcile(ctx context.Context, p *v1.Project, cfg *
 	limit := int64(-1)
 	if q := p.Spec.Quota.RegistryStorage; q != nil {
 		limit = q.Value()
+	} else if q := cfg.DefaultQuota.RegistryStorage; q != nil {
+		limit = q.Value()
 	}
 	if err := h.SetStorageQuota(ctx, hp, limit); err != nil {
 		return err
@@ -179,7 +181,7 @@ func (r *RegistryReconciler) reconcile(ctx context.Context, p *v1.Project, cfg *
 		if password, err = harbor.GenerateSecret(); err != nil {
 			return err
 		}
-		if username, err = h.EnsureRobot(ctx, hp, harbor.RobotName, password); err != nil {
+		if username, err = h.EnsureRobotWithReadProjects(ctx, hp, harbor.RobotName, password, cfg.Registry.PublicProjects); err != nil {
 			return err
 		}
 		logf.FromContext(ctx).Info("Issued Harbor robot credentials", "project", ns, "robot", username)

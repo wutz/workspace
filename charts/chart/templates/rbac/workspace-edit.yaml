@@ -54,10 +54,10 @@ rules:
   - ""
   resources:
   - secrets
+  resourceNames:
+  - workspace-registry
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - events.k8s.io
   resources:

@@ -4,6 +4,7 @@
 resources:
 - bases/workspace.wutz.dev_instancetypes.yaml
 - bases/workspace.wutz.dev_projects.yaml
+- bases/workspace.wutz.dev_resourcepools.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
