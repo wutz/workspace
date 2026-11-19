@@ -131,16 +131,16 @@ func poolFlavorEntry(name string, milliCPU, memory, gpus int64, borrow, lend *in
 		keyNominalQuota: fmt.Sprint(gpus),
 	}
 	if borrow != nil {
-		gpuRes["borrowingLimit"] = fmt.Sprint(*borrow)
+		gpuRes[keyBorrowingLimit] = fmt.Sprint(*borrow)
 	}
 	if lend != nil {
 		gpuRes["lendingLimit"] = fmt.Sprint(*lend)
 	}
 	return map[string]any{
 		naming.KeyName: name,
-		"resources": []any{
-			map[string]any{naming.KeyName: "cpu", keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
-			map[string]any{naming.KeyName: "memory", keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
+		keyResources: []any{
+			map[string]any{naming.KeyName: keyCPU, keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
+			map[string]any{naming.KeyName: keyMemory, keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
 			gpuRes,
 		},
 	}
@@ -149,21 +149,21 @@ func poolFlavorEntry(name string, milliCPU, memory, gpus int64, borrow, lend *in
 func spotFlavorEntry(name string, milliCPU, memory, borrowGPUs int64) map[string]any {
 	return map[string]any{
 		naming.KeyName: name,
-		"resources": []any{
+		keyResources: []any{
 			map[string]any{
-				naming.KeyName:   "cpu",
-				keyNominalQuota:  "0",
-				"borrowingLimit": resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String(),
+				naming.KeyName:    keyCPU,
+				keyNominalQuota:   "0",
+				keyBorrowingLimit: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String(),
 			},
 			map[string]any{
-				naming.KeyName:   "memory",
-				keyNominalQuota:  "0",
-				"borrowingLimit": resource.NewQuantity(memory, resource.BinarySI).String(),
+				naming.KeyName:    keyMemory,
+				keyNominalQuota:   "0",
+				keyBorrowingLimit: resource.NewQuantity(memory, resource.BinarySI).String(),
 			},
 			map[string]any{
-				naming.KeyName:   string(instancetype.ResourceGPU),
-				keyNominalQuota:  "0",
-				"borrowingLimit": fmt.Sprint(borrowGPUs),
+				naming.KeyName:    string(instancetype.ResourceGPU),
+				keyNominalQuota:   "0",
+				keyBorrowingLimit: fmt.Sprint(borrowGPUs),
 			},
 		},
 	}
@@ -244,21 +244,21 @@ func buildExclusivePoolClusterQueue(
 
 	u := &unstructured.Unstructured{Object: map[string]any{
 		naming.KeyMetadata: map[string]any{
-			naming.KeyName:    cqName,
-			naming.KeyLabels:  labels,
-			"ownerReferences": []any{ownerRef(p)},
+			naming.KeyName:     cqName,
+			naming.KeyLabels:   labels,
+			keyOwnerReferences: []any{ownerRef(p)},
 		},
-		"spec": map[string]any{
-			"cohortName":        cohort,
-			"namespaceSelector": map[string]any{"matchLabels": map[string]any{corev1.LabelMetadataName: ns}},
-			"queueingStrategy":  "BestEffortFIFO",
+		naming.KeySpec: map[string]any{
+			keyCohortName:        cohort,
+			keyNamespaceSelector: map[string]any{keyMatchLabels: map[string]any{corev1.LabelMetadataName: ns}},
+			keyQueueingStrategy:  queueingBestEffort,
 			"preemption": map[string]any{
 				"reclaimWithinCohort": "Any",
 				"withinClusterQueue":  "LowerPriority",
 			},
-			"resourceGroups": []any{map[string]any{
-				"coveredResources": []any{"cpu", "memory", string(instancetype.ResourceGPU)},
-				"flavors":          flavors,
+			keyResourceGroups: []any{map[string]any{
+				keyCoveredResources: []any{keyCPU, keyMemory, string(instancetype.ResourceGPU)},
+				keyFlavors:          flavors,
 			}},
 		},
 	}}
@@ -274,23 +274,23 @@ func buildSharedPoolClusterQueue(p *v1.Project, ns string, pq v1.PoolQuota) *uns
 	}
 	labels := toAny(projectLabels(p))
 	labels[naming.LabelPool] = pq.Pool
-	labels[naming.LabelPoolMode] = "shared"
+	labels[naming.LabelPoolMode] = naming.PoolModeShared
 
 	u := &unstructured.Unstructured{Object: map[string]any{
 		naming.KeyMetadata: map[string]any{
-			naming.KeyName:    cqName,
-			naming.KeyLabels:  labels,
-			"ownerReferences": []any{ownerRef(p)},
+			naming.KeyName:     cqName,
+			naming.KeyLabels:   labels,
+			keyOwnerReferences: []any{ownerRef(p)},
 		},
-		"spec": map[string]any{
-			"cohortName":        naming.PoolCohort(pq.Pool),
-			"namespaceSelector": map[string]any{"matchLabels": map[string]any{corev1.LabelMetadataName: ns}},
-			"queueingStrategy":  "BestEffortFIFO",
-			"resourceGroups": []any{map[string]any{
-				"coveredResources": []any{naming.ResourceSharedSlot},
-				"flavors": []any{map[string]any{
+		naming.KeySpec: map[string]any{
+			keyCohortName:        naming.PoolCohort(pq.Pool),
+			keyNamespaceSelector: map[string]any{keyMatchLabels: map[string]any{corev1.LabelMetadataName: ns}},
+			keyQueueingStrategy:  queueingBestEffort,
+			keyResourceGroups: []any{map[string]any{
+				keyCoveredResources: []any{naming.ResourceSharedSlot},
+				keyFlavors: []any{map[string]any{
 					naming.KeyName: naming.PoolSharedFlavor(pq.Pool),
-					"resources": []any{map[string]any{
+					keyResources: []any{map[string]any{
 						naming.KeyName:  naming.ResourceSharedSlot,
 						keyNominalQuota: strconv.Itoa(int(maxSandboxes)),
 					}},
@@ -373,21 +373,21 @@ func buildSpotClusterQueue(
 
 	u := &unstructured.Unstructured{Object: map[string]any{
 		naming.KeyMetadata: map[string]any{
-			naming.KeyName:    naming.SpotClusterQueue(ns),
-			naming.KeyLabels:  labels,
-			"ownerReferences": []any{ownerRef(p)},
+			naming.KeyName:     naming.SpotClusterQueue(ns),
+			naming.KeyLabels:   labels,
+			keyOwnerReferences: []any{ownerRef(p)},
 		},
-		"spec": map[string]any{
-			"cohortName":        naming.SpotCohort,
-			"namespaceSelector": map[string]any{"matchLabels": map[string]any{corev1.LabelMetadataName: ns}},
-			"queueingStrategy":  "BestEffortFIFO",
+		naming.KeySpec: map[string]any{
+			keyCohortName:        naming.SpotCohort,
+			keyNamespaceSelector: map[string]any{keyMatchLabels: map[string]any{corev1.LabelMetadataName: ns}},
+			keyQueueingStrategy:  queueingBestEffort,
 			"preemption": map[string]any{
 				"reclaimWithinCohort": "Never",
 				"withinClusterQueue":  "Never",
 			},
-			"resourceGroups": []any{map[string]any{
-				"coveredResources": []any{"cpu", "memory", string(instancetype.ResourceGPU)},
-				"flavors":          flavors,
+			keyResourceGroups: []any{map[string]any{
+				keyCoveredResources: []any{keyCPU, keyMemory, string(instancetype.ResourceGPU)},
+				keyFlavors:          flavors,
 			}},
 		},
 	}}
@@ -400,7 +400,7 @@ func poolAnnotations(rp *v1.ResourcePool) map[string]string {
 		naming.AnnotationAllowedWorkloads: workloadNames(resourcepool.EffectiveAllowedWorkloads(rp)),
 	}
 	if rp != nil && rp.Spec.Rules != nil && rp.Spec.Rules.IdleShutdown != nil && rp.Spec.Rules.IdleShutdown.Enabled {
-		ann[naming.AnnotationIdleShutdownEnabled] = "true"
+		ann[naming.AnnotationIdleShutdownEnabled] = valueTrue
 	}
 	return ann
 }
@@ -484,54 +484,8 @@ func (r *ProjectReconciler) reconcileQueues(
 			ClusterQueue:     cqName,
 			AllowedWorkloads: resourcepool.EffectiveAllowedWorkloads(defPool),
 		})
-	} else {
-		// Pool-aware path: one ClusterQueue + LocalQueue per bound ResourcePool.
-		hasDefaultPool := false
-		for _, pq := range p.Spec.PoolQuotas {
-			if pq.Pool == naming.DefaultPoolName {
-				hasDefaultPool = true
-				break
-			}
-		}
-		for i, pq := range p.Spec.PoolQuotas {
-			rp := pools[pq.Pool]
-			mode := resourcepool.EffectiveMode(rp)
-			cqName := naming.PoolClusterQueue(ns, pq.Pool)
-			lqName := pq.Pool
-
-			if mode == v1.PoolModeShared {
-				cq := buildSharedPoolClusterQueue(p, ns, pq)
-				if err := apply(ctx, r.Client, cq); err != nil {
-					return res, fmt.Errorf("apply shared ClusterQueue %s: %w", cqName, err)
-				}
-			} else {
-				includeCPU := pq.Pool == naming.DefaultPoolName || (!hasDefaultPool && i == 0)
-				cq, counts := buildExclusivePoolClusterQueue(p, cfg, ns, pq, rp, classes, includeCPU)
-				if err := apply(ctx, r.Client, cq); err != nil {
-					return res, fmt.Errorf("apply ClusterQueue %s: %w", cqName, err)
-				}
-				res.gpuQuotasByPool[pq.Pool] = counts
-			}
-
-			lq := buildLocalQueue(p, ns, lqName, cqName, pq.Pool, mode, poolAnnotations(rp))
-			if err := apply(ctx, r.Client, lq); err != nil {
-				return res, fmt.Errorf("apply LocalQueue %s: %w", lqName, err)
-			}
-			wantCQs[cqName] = true
-			wantLQs[lqName] = true
-			res.clusterQueues = append(res.clusterQueues, cqName)
-			res.queues = append(res.queues, v1.QueueStatus{
-				Name:             lqName,
-				Pool:             pq.Pool,
-				Mode:             mode,
-				ClusterQueue:     cqName,
-				AllowedWorkloads: resourcepool.EffectiveAllowedWorkloads(rp),
-			})
-			if res.defaultCQ == "" || pq.Pool == naming.DefaultPoolName {
-				res.defaultCQ = cqName
-				res.defaultLQ = lqName
-			}
-		}
+	} else if err := r.applyPoolQueues(ctx, p, cfg, ns, classes, pools, &res, wantLQs, wantCQs); err != nil {
+		return res, err
 	}
 
 	// Provision preemptible Spot queue when enabled.
@@ -571,6 +525,62 @@ func (r *ProjectReconciler) reconcileQueues(
 	}
 	slices.Sort(res.clusterQueues)
 	return res, nil
+}
+
+// applyPoolQueues creates one ClusterQueue and LocalQueue per ResourcePool the
+// Project is bound to through spec.poolQuotas.
+func (r *ProjectReconciler) applyPoolQueues(
+	ctx context.Context, p *v1.Project, cfg *platform.Config, ns string,
+	classes []instancetype.Class, pools map[string]*v1.ResourcePool,
+	res *queueReconcileResult, wantLQs, wantCQs map[string]bool,
+) error {
+	hasDefaultPool := false
+	for _, pq := range p.Spec.PoolQuotas {
+		if pq.Pool == naming.DefaultPoolName {
+			hasDefaultPool = true
+			break
+		}
+	}
+	for i, pq := range p.Spec.PoolQuotas {
+		rp := pools[pq.Pool]
+		mode := resourcepool.EffectiveMode(rp)
+		cqName := naming.PoolClusterQueue(ns, pq.Pool)
+		lqName := pq.Pool
+
+		if mode == v1.PoolModeShared {
+			cq := buildSharedPoolClusterQueue(p, ns, pq)
+			if err := apply(ctx, r.Client, cq); err != nil {
+				return fmt.Errorf("apply shared ClusterQueue %s: %w", cqName, err)
+			}
+		} else {
+			includeCPU := pq.Pool == naming.DefaultPoolName || (!hasDefaultPool && i == 0)
+			cq, counts := buildExclusivePoolClusterQueue(p, cfg, ns, pq, rp, classes, includeCPU)
+			if err := apply(ctx, r.Client, cq); err != nil {
+				return fmt.Errorf("apply ClusterQueue %s: %w", cqName, err)
+			}
+			res.gpuQuotasByPool[pq.Pool] = counts
+		}
+
+		lq := buildLocalQueue(p, ns, lqName, cqName, pq.Pool, mode, poolAnnotations(rp))
+		if err := apply(ctx, r.Client, lq); err != nil {
+			return fmt.Errorf("apply LocalQueue %s: %w", lqName, err)
+		}
+		wantCQs[cqName] = true
+		wantLQs[lqName] = true
+		res.clusterQueues = append(res.clusterQueues, cqName)
+		res.queues = append(res.queues, v1.QueueStatus{
+			Name:             lqName,
+			Pool:             pq.Pool,
+			Mode:             mode,
+			ClusterQueue:     cqName,
+			AllowedWorkloads: resourcepool.EffectiveAllowedWorkloads(rp),
+		})
+		if res.defaultCQ == "" || pq.Pool == naming.DefaultPoolName {
+			res.defaultCQ = cqName
+			res.defaultLQ = lqName
+		}
+	}
+	return nil
 }
 
 func (r *ProjectReconciler) pruneStaleQueues(

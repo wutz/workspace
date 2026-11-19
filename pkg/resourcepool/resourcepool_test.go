@@ -15,7 +15,7 @@ import (
 	"github.com/wutz/workspace/pkg/platform"
 )
 
-func makeGPUNode(name, zone, currentPool string, gpus int64, ready bool) corev1.Node {
+func makeGPUNode(name, zone, currentPool string, gpus int64, ready bool) corev1.Node { //nolint:unparam // gpus is fixed at 8 today, kept for other node shapes.
 	status := corev1.ConditionTrue
 	if !ready {
 		status = corev1.ConditionFalse
@@ -43,7 +43,7 @@ func makeGPUNode(name, zone, currentPool string, gpus int64, ready bool) corev1.
 	}
 }
 
-func makePod(ns, name, node string, cpu, mem string, gpus int64, sharedSlots int64) corev1.Pod {
+func makePod(ns, name, node string, cpu, mem string, gpus int64, sharedSlots int64) corev1.Pod { //nolint:unparam // sharedSlots mirrors the pod shape used by shared pools.
 	req := corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse(cpu),
 		corev1.ResourceMemory: resource.MustParse(mem),

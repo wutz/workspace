@@ -24,6 +24,9 @@ const (
 	LabelPool = "workspace.wutz.dev/pool"
 	// LabelPoolMode is set on Nodes and queues (exclusive or shared).
 	LabelPoolMode = "workspace.wutz.dev/pool-mode"
+	// PoolModeExclusive and PoolModeShared are the values of LabelPoolMode.
+	PoolModeExclusive = "exclusive"
+	PoolModeShared    = "shared"
 	// LabelDefaultPool marks the built-in default ResourcePool.
 	LabelDefaultPool = "workspace.wutz.dev/default-pool"
 	// LabelSharedVolume marks the auto-provisioned RWX shared PVC in a project namespace.

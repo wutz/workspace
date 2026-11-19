@@ -234,141 +234,10 @@ func Compute(
 
 	usage := computeNodeUsage(pods, managedNamespaces)
 
-	// Step 1: Determine desired pool per node and track explicit node issues
-	// (NotFound, Conflict, ZoneMismatch).
-	desiredPool := map[string]string{}
-	poolIssues := map[string][]v1.ResourcePoolNodeStatus{}
-
-	// 1a. Explicit spec.nodes (named pools take precedence over default; if two
-	// named pools claim the same node, the current holder wins, else alphabetical).
-	claims := map[string][]string{}
-	for _, pName := range poolNames {
-		if pName == naming.DefaultPoolName {
-			continue
-		}
-		p := poolByName[pName]
-		for _, nName := range p.Spec.Nodes {
-			if _, exists := nodeByName[nName]; !exists {
-				poolIssues[pName] = append(poolIssues[pName], v1.ResourcePoolNodeStatus{
-					Node:    nName,
-					State:   v1.NodePoolNotFound,
-					Message: "node does not exist in cluster",
-				})
-				continue
-			}
-			claims[nName] = append(claims[nName], pName)
-		}
-	}
-
-	for _, nName := range nodeNames {
-		n := nodeByName[nName]
-		claimants := claims[nName]
-		if len(claimants) == 0 {
-			continue
-		}
-		winner := claimants[0]
-		curPool := n.Labels[naming.LabelPool]
-		if curPool != "" && slices.Contains(claimants, curPool) {
-			winner = curPool
-		}
-		for _, c := range claimants {
-			if c != winner {
-				poolIssues[c] = append(poolIssues[c], v1.ResourcePoolNodeStatus{
-					Node:    nName,
-					Zone:    n.Labels[naming.LabelTopologyZone],
-					State:   v1.NodePoolConflict,
-					Message: fmt.Sprintf("node is already assigned to pool %s", winner),
-				})
-			}
-		}
-		p := poolByName[winner]
-		if p.Spec.Zone != "" && n.Labels[naming.LabelTopologyZone] != p.Spec.Zone {
-			poolIssues[winner] = append(poolIssues[winner], v1.ResourcePoolNodeStatus{
-				Node:    nName,
-				Zone:    n.Labels[naming.LabelTopologyZone],
-				State:   v1.NodePoolZoneMismatch,
-				Message: fmt.Sprintf("node zone %q does not match pool zone %q", n.Labels[naming.LabelTopologyZone], p.Spec.Zone),
-			})
-			continue
-		}
-		desiredPool[nName] = winner
-	}
-
-	// 1b. Dynamic spec.nodeSelector on named pools for nodes not explicitly claimed.
-	for _, pName := range poolNames {
-		if pName == naming.DefaultPoolName {
-			continue
-		}
-		p := poolByName[pName]
-		if len(p.Spec.NodeSelector) == 0 {
-			continue
-		}
-		for _, nName := range nodeNames {
-			if _, taken := desiredPool[nName]; taken {
-				continue
-			}
-			n := nodeByName[nName]
-			if !matchesSelector(n.Labels, p.Spec.NodeSelector) {
-				continue
-			}
-			if p.Spec.Zone != "" && n.Labels[naming.LabelTopologyZone] != p.Spec.Zone {
-				poolIssues[pName] = append(poolIssues[pName], v1.ResourcePoolNodeStatus{
-					Node:    nName,
-					Zone:    n.Labels[naming.LabelTopologyZone],
-					State:   v1.NodePoolZoneMismatch,
-					Message: fmt.Sprintf("node zone %q does not match pool zone %q", n.Labels[naming.LabelTopologyZone], p.Spec.Zone),
-				})
-				continue
-			}
-			desiredPool[nName] = pName
-		}
-	}
-
-	// 1c. Remaining nodes fall into the built-in default pool (when it exists).
-	if _, hasDefault := poolByName[naming.DefaultPoolName]; hasDefault {
-		for _, nName := range nodeNames {
-			if _, taken := desiredPool[nName]; !taken {
-				desiredPool[nName] = naming.DefaultPoolName
-			}
-		}
-	}
-
-	// Step 2: Apply idle-node transfer guard. If a node currently belongs to an
-	// existing pool and has active workloads, block transferring it to another pool.
-	effectivePool := map[string]string{}
-	blockedTarget := map[string]map[string]string{} // targetPool -> nodeName -> msg
-	blockedSource := map[string]map[string]string{} // sourcePool -> nodeName -> msg
-
-	for _, nName := range nodeNames {
-		target, ok := desiredPool[nName]
-		if !ok {
-			continue
-		}
-		n := nodeByName[nName]
-		cur := n.Labels[naming.LabelPool]
-		// Only block if the node is migrating away from a different, still-existing pool.
-		if cur != "" && cur != target {
-			if _, curExists := poolByName[cur]; curExists {
-				if u := usage[nName]; u != nil && len(u.blockingPods) > 0 {
-					msg := fmt.Sprintf(
-						"cannot transfer node from pool %s to %s while active workloads run: %s",
-						cur, target, strings.Join(u.blockingPods, ", "),
-					)
-					effectivePool[nName] = cur
-					if blockedTarget[target] == nil {
-						blockedTarget[target] = map[string]string{}
-					}
-					blockedTarget[target][nName] = msg
-					if blockedSource[cur] == nil {
-						blockedSource[cur] = map[string]string{}
-					}
-					blockedSource[cur][nName] = msg
-					continue
-				}
-			}
-		}
-		effectivePool[nName] = target
-	}
+	desiredPool, poolIssues := assignPools(poolByName, poolNames, nodeByName, nodeNames)
+	effectivePool, blockedTarget, blockedSource := guardTransfers(
+		desiredPool, nodeByName, nodeNames, poolByName, usage,
+	)
 
 	// Step 3: Build per-node assignments and per-pool member node lists.
 	plan := Plan{
@@ -537,6 +406,162 @@ func Compute(
 	}
 
 	return plan
+}
+
+// assignPools decides the desired pool of every node from explicit claims,
+// dynamic nodeSelectors and the built-in default pool, recording explicit
+// NotFound, Conflict and ZoneMismatch issues per pool.
+func assignPools(
+	poolByName map[string]*v1.ResourcePool,
+	poolNames []string,
+	nodeByName map[string]*corev1.Node,
+	nodeNames []string,
+) (map[string]string, map[string][]v1.ResourcePoolNodeStatus) {
+	desiredPool := map[string]string{}
+	poolIssues := map[string][]v1.ResourcePoolNodeStatus{}
+
+	// 1a. Explicit spec.nodes (named pools take precedence over default; if two
+	// named pools claim the same node, the current holder wins, else alphabetical).
+	claims := map[string][]string{}
+	for _, pName := range poolNames {
+		if pName == naming.DefaultPoolName {
+			continue
+		}
+		p := poolByName[pName]
+		for _, nName := range p.Spec.Nodes {
+			if _, exists := nodeByName[nName]; !exists {
+				poolIssues[pName] = append(poolIssues[pName], v1.ResourcePoolNodeStatus{
+					Node:    nName,
+					State:   v1.NodePoolNotFound,
+					Message: "node does not exist in cluster",
+				})
+				continue
+			}
+			claims[nName] = append(claims[nName], pName)
+		}
+	}
+
+	for _, nName := range nodeNames {
+		n := nodeByName[nName]
+		claimants := claims[nName]
+		if len(claimants) == 0 {
+			continue
+		}
+		winner := claimants[0]
+		curPool := n.Labels[naming.LabelPool]
+		if curPool != "" && slices.Contains(claimants, curPool) {
+			winner = curPool
+		}
+		for _, c := range claimants {
+			if c != winner {
+				poolIssues[c] = append(poolIssues[c], v1.ResourcePoolNodeStatus{
+					Node:    nName,
+					Zone:    n.Labels[naming.LabelTopologyZone],
+					State:   v1.NodePoolConflict,
+					Message: fmt.Sprintf("node is already assigned to pool %s", winner),
+				})
+			}
+		}
+		p := poolByName[winner]
+		if p.Spec.Zone != "" && n.Labels[naming.LabelTopologyZone] != p.Spec.Zone {
+			poolIssues[winner] = append(poolIssues[winner], v1.ResourcePoolNodeStatus{
+				Node:    nName,
+				Zone:    n.Labels[naming.LabelTopologyZone],
+				State:   v1.NodePoolZoneMismatch,
+				Message: fmt.Sprintf("node zone %q does not match pool zone %q", n.Labels[naming.LabelTopologyZone], p.Spec.Zone),
+			})
+			continue
+		}
+		desiredPool[nName] = winner
+	}
+
+	// 1b. Dynamic spec.nodeSelector on named pools for nodes not explicitly claimed.
+	for _, pName := range poolNames {
+		if pName == naming.DefaultPoolName {
+			continue
+		}
+		p := poolByName[pName]
+		if len(p.Spec.NodeSelector) == 0 {
+			continue
+		}
+		for _, nName := range nodeNames {
+			if _, taken := desiredPool[nName]; taken {
+				continue
+			}
+			n := nodeByName[nName]
+			if !matchesSelector(n.Labels, p.Spec.NodeSelector) {
+				continue
+			}
+			if p.Spec.Zone != "" && n.Labels[naming.LabelTopologyZone] != p.Spec.Zone {
+				poolIssues[pName] = append(poolIssues[pName], v1.ResourcePoolNodeStatus{
+					Node:    nName,
+					Zone:    n.Labels[naming.LabelTopologyZone],
+					State:   v1.NodePoolZoneMismatch,
+					Message: fmt.Sprintf("node zone %q does not match pool zone %q", n.Labels[naming.LabelTopologyZone], p.Spec.Zone),
+				})
+				continue
+			}
+			desiredPool[nName] = pName
+		}
+	}
+
+	// 1c. Remaining nodes fall into the built-in default pool (when it exists).
+	if _, hasDefault := poolByName[naming.DefaultPoolName]; hasDefault {
+		for _, nName := range nodeNames {
+			if _, taken := desiredPool[nName]; !taken {
+				desiredPool[nName] = naming.DefaultPoolName
+			}
+		}
+	}
+
+	return desiredPool, poolIssues
+}
+
+// guardTransfers applies the idle-node transfer guard: a node that still runs
+// active workloads stays in its current pool instead of moving to the target.
+func guardTransfers(
+	desiredPool map[string]string,
+	nodeByName map[string]*corev1.Node,
+	nodeNames []string,
+	poolByName map[string]*v1.ResourcePool,
+	usage map[string]*nodeUsage,
+) (map[string]string, map[string]map[string]string, map[string]map[string]string) {
+	effectivePool := map[string]string{}
+	blockedTarget := map[string]map[string]string{} // targetPool -> nodeName -> msg
+	blockedSource := map[string]map[string]string{} // sourcePool -> nodeName -> msg
+
+	for _, nName := range nodeNames {
+		target, ok := desiredPool[nName]
+		if !ok {
+			continue
+		}
+		n := nodeByName[nName]
+		cur := n.Labels[naming.LabelPool]
+		// Only block if the node is migrating away from a different, still-existing pool.
+		if cur != "" && cur != target {
+			if _, curExists := poolByName[cur]; curExists {
+				if u := usage[nName]; u != nil && len(u.blockingPods) > 0 {
+					msg := fmt.Sprintf(
+						"cannot transfer node from pool %s to %s while active workloads run: %s",
+						cur, target, strings.Join(u.blockingPods, ", "),
+					)
+					effectivePool[nName] = cur
+					if blockedTarget[target] == nil {
+						blockedTarget[target] = map[string]string{}
+					}
+					blockedTarget[target][nName] = msg
+					if blockedSource[cur] == nil {
+						blockedSource[cur] = map[string]string{}
+					}
+					blockedSource[cur][nName] = msg
+					continue
+				}
+			}
+		}
+		effectivePool[nName] = target
+	}
+
+	return effectivePool, blockedTarget, blockedSource
 }
 
 func computeLaunchable(

@@ -192,7 +192,7 @@ func (r *ResourcePoolReconciler) ensureDefaultPool(ctx context.Context) error {
 			Name: naming.DefaultPoolName,
 			Labels: map[string]string{
 				naming.LabelManagedBy:   naming.ManagedBy,
-				naming.LabelDefaultPool: "true",
+				naming.LabelDefaultPool: valueTrue,
 			},
 		},
 		Spec: v1.ResourcePoolSpec{
@@ -249,7 +249,7 @@ func (r *ResourcePoolReconciler) syncNode(ctx context.Context, n *corev1.Node, a
 		if assign.WantSharedTaint {
 			n.Spec.Taints = append(n.Spec.Taints, corev1.Taint{
 				Key:    naming.TaintSharedPool,
-				Value:  "true",
+				Value:  valueTrue,
 				Effect: corev1.TaintEffectNoSchedule,
 			})
 		} else {
@@ -292,17 +292,17 @@ func poolResourceFlavor(f resourcepool.PoolFlavor) *unstructured.Unstructured {
 	if f.SharedTaint {
 		spec["nodeTaints"] = []any{
 			map[string]any{
-				"key":    naming.TaintSharedPool,
-				"value":  "true",
-				"effect": string(corev1.TaintEffectNoSchedule),
+				"key":       naming.TaintSharedPool,
+				keyUseValue: valueTrue,
+				"effect":    string(corev1.TaintEffectNoSchedule),
 			},
 		}
 		spec["tolerations"] = []any{
 			map[string]any{
-				"key":      naming.TaintSharedPool,
-				"operator": string(corev1.TolerationOpEqual),
-				"value":    "true",
-				"effect":   string(corev1.TaintEffectNoSchedule),
+				"key":       naming.TaintSharedPool,
+				"operator":  string(corev1.TolerationOpEqual),
+				keyUseValue: valueTrue,
+				"effect":    string(corev1.TaintEffectNoSchedule),
 			},
 		}
 	}

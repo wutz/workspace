@@ -256,7 +256,7 @@ func ComputeAll(
 }
 
 func isSharedWorkloadPod(p *corev1.Pod) bool {
-	if p.Labels[naming.LabelPoolMode] == "shared" {
+	if p.Labels[naming.LabelPoolMode] == naming.PoolModeShared {
 		return true
 	}
 	req := PodRequests(p)
@@ -285,7 +285,9 @@ func scaledExtendedResources(base corev1.ResourceList, factor int64) corev1.Reso
 	return out
 }
 
-func instanceType(c Class, size int32, nodes map[string]*node, cfg platform.InstanceTypes, now metav1.Time) v1.InstanceType {
+func instanceType(
+	c Class, size int32, nodes map[string]*node, cfg platform.InstanceTypes, now metav1.Time,
+) v1.InstanceType {
 	n64 := int64(size)
 	spec := v1.InstanceTypeSpec{
 		GPU:               v1.InstanceTypeGPU{Class: c.Name, Product: c.Product, Count: size, MemoryMiB: c.MemoryMiB},
@@ -443,7 +445,7 @@ func sharedInstanceTypes(
 				Labels: map[string]string{
 					naming.LabelManagedBy: naming.ManagedBy,
 					naming.LabelGPUClass:  c.Name,
-					naming.LabelPoolMode:  "shared",
+					naming.LabelPoolMode:  naming.PoolModeShared,
 				},
 			},
 			Spec: v1.InstanceTypeSpec{
@@ -453,7 +455,7 @@ func sharedInstanceTypes(
 				CPU:          *resource.NewMilliQuantity(c.MilliCPU, resource.DecimalSI),
 				Memory:       *resource.NewQuantity(c.Memory, resource.BinarySI),
 				Shared:       true,
-				NodeSelector: map[string]string{naming.LabelGPUProduct: c.Product, naming.LabelPoolMode: "shared"},
+				NodeSelector: map[string]string{naming.LabelGPUProduct: c.Product, naming.LabelPoolMode: naming.PoolModeShared},
 			},
 			Status: v1.InstanceTypeStatus{Nodes: []v1.NodeAvailability{}, UpdateTime: &now},
 		}

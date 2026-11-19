@@ -87,7 +87,7 @@ func (r *ProjectReconciler) reconcileSharedVolume(
 	}
 
 	labels := projectLabels(p)
-	labels[naming.LabelSharedVolume] = "true"
+	labels[naming.LabelSharedVolume] = valueTrue
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      naming.SharedVolumeName,
@@ -161,7 +161,7 @@ func (r *ProjectReconciler) reconcilePublicDatasets(
 				"volumeHandle":     ds.VolumeHandle,
 				"path":             ds.Path,
 				"mountPath":        mountPath,
-				"readOnly":         "true",
+				"readOnly":         valueTrue,
 			},
 		}
 		if err := apply(ctx, r.Client, cm); err != nil {

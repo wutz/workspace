@@ -61,6 +61,23 @@ const (
 	verbGet          = "get"
 	verbWatch        = "watch"
 	verbList         = "list"
+
+	// Kueue and unstructured field names shared by the queue builders.
+	keyResources         = "resources"
+	keyCPU               = "cpu"
+	keyMemory            = "memory"
+	keyCoveredResources  = "coveredResources"
+	keyFlavors           = "flavors"
+	keyResourceGroups    = "resourceGroups"
+	keyOwnerReferences   = "ownerReferences"
+	keyMatchLabels       = "matchLabels"
+	keyBorrowingLimit    = "borrowingLimit"
+	keyCohortName        = "cohortName"
+	keyNamespaceSelector = "namespaceSelector"
+	keyQueueingStrategy  = "queueingStrategy"
+	keyUseValue          = "value"
+	queueingBestEffort   = "BestEffortFIFO"
+	valueTrue            = "true"
 )
 
 // ProjectReconciler turns a Project into a labelled namespace with quota,
@@ -124,31 +141,31 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.reconcileProject(ctx, p, cfg, ns); err != nil {
 		metrics.ObserveProject(p.Name, false, nil)
 		if _, ok := errors.AsType[*namespaceConflictError](err); ok {
-			setCondition(p, v1.ConditionReady, metav1.ConditionFalse, "NamespaceConflict", err.Error())
+			setCondition(p, metav1.ConditionFalse, "NamespaceConflict", err.Error())
 			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 		}
 		if pae, ok := errors.AsType[*poolAccessError](err); ok {
-			setCondition(p, v1.ConditionReady, metav1.ConditionFalse, pae.reason, pae.Error())
+			setCondition(p, metav1.ConditionFalse, pae.reason, pae.Error())
 			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 		}
 		if dae, ok := errors.AsType[*datasetAccessError](err); ok {
-			setCondition(p, v1.ConditionReady, metav1.ConditionFalse, dae.reason, dae.Error())
+			setCondition(p, metav1.ConditionFalse, dae.reason, dae.Error())
 			return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 		}
-		setCondition(p, v1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
+		setCondition(p, metav1.ConditionFalse, "ReconcileError", err.Error())
 		_ = r.Status().Patch(ctx, p, statusPatch(orig))
 		return ctrl.Result{}, err
 	}
-	setCondition(p, v1.ConditionReady, metav1.ConditionTrue, "Ready", "")
+	setCondition(p, metav1.ConditionTrue, "Ready", "")
 	if !meta.IsStatusConditionTrue(orig.Status.Conditions, v1.ConditionReady) {
 		log.Info("Project is ready", "namespace", ns)
 	}
 	return ctrl.Result{}, r.Status().Patch(ctx, p, statusPatch(orig))
 }
 
-func setCondition(p *v1.Project, t string, s metav1.ConditionStatus, reason, msg string) {
+func setCondition(p *v1.Project, s metav1.ConditionStatus, reason, msg string) {
 	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
-		Type: t, Status: s, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
+		Type: v1.ConditionReady, Status: s, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
 	})
 }
 
@@ -554,9 +571,9 @@ func cpuResourceFlavor() *unstructured.Unstructured {
 func flavor(name string, milliCPU, memory, gpus int64) map[string]any {
 	return map[string]any{
 		naming.KeyName: name,
-		"resources": []any{
-			map[string]any{naming.KeyName: "cpu", keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
-			map[string]any{naming.KeyName: "memory", keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
+		keyResources: []any{
+			map[string]any{naming.KeyName: keyCPU, keyNominalQuota: resource.NewMilliQuantity(milliCPU, resource.DecimalSI).String()},
+			map[string]any{naming.KeyName: keyMemory, keyNominalQuota: resource.NewQuantity(memory, resource.BinarySI).String()},
 			map[string]any{naming.KeyName: string(instancetype.ResourceGPU), keyNominalQuota: fmt.Sprint(gpus)},
 		},
 	}
@@ -576,18 +593,18 @@ func clusterQueue(p *v1.Project, cfg *platform.Config, ns string, classes []inst
 	headroom := cfg.DefaultQuota.Headroom
 	flavors = append(flavors, flavor(naming.ResourceFlavor(cpuFlavor), headroom.CPU.MilliValue(), headroom.Memory.Value(), 0))
 	groups := []any{map[string]any{
-		"coveredResources": []any{"cpu", "memory", string(instancetype.ResourceGPU)},
-		"flavors":          flavors,
+		keyCoveredResources: []any{keyCPU, keyMemory, string(instancetype.ResourceGPU)},
+		keyFlavors:          flavors,
 	}}
 	u := &unstructured.Unstructured{Object: map[string]any{
 		naming.KeyMetadata: map[string]any{
 			naming.KeyName: naming.ClusterQueue(ns), naming.KeyLabels: toAny(projectLabels(p)),
-			"ownerReferences": []any{ownerRef(p)},
+			keyOwnerReferences: []any{ownerRef(p)},
 		},
-		"spec": map[string]any{
-			"namespaceSelector": map[string]any{"matchLabels": map[string]any{corev1.LabelMetadataName: ns}},
-			"queueingStrategy":  "BestEffortFIFO",
-			"resourceGroups":    groups,
+		naming.KeySpec: map[string]any{
+			keyNamespaceSelector: map[string]any{keyMatchLabels: map[string]any{corev1.LabelMetadataName: ns}},
+			keyQueueingStrategy:  queueingBestEffort,
+			keyResourceGroups:    groups,
 		},
 	}}
 	u.SetGroupVersionKind(kf.ClusterQueueGVK)

@@ -288,7 +288,9 @@ func (c *Client) EnsureRobot(ctx context.Context, p *Project, name, secret strin
 
 // EnsureRobotWithReadProjects creates (or resets) the project robot with push/pull
 // access to p and read-only pull access to any extra shared base-image projects.
-func (c *Client) EnsureRobotWithReadProjects(ctx context.Context, p *Project, name, secret string, readProjects []string) (string, error) {
+func (c *Client) EnsureRobotWithReadProjects(
+	ctx context.Context, p *Project, name, secret string, readProjects []string,
+) (string, error) {
 	r, err := c.findRobot(ctx, p, name)
 	if errors.Is(err, ErrNotFound) {
 		in := map[string]any{
