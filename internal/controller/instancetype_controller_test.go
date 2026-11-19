@@ -64,16 +64,16 @@ var _ = Describe("InstanceType controller", Ordered, func() {
 
 	It("derives instance types and resource flavors from GPU nodes", func() {
 		it := &v1.InstanceType{}
-		Eventually(get(it, "", "rtx-5090.x2"), timeout, interval).Should(Succeed())
+		Eventually(get(it, "", "rtx-5090.x4"), timeout, interval).Should(Succeed())
 		// (128 - 8) / 8 = 15 cores, (1024 - 64) / 8 = 120 GiB per GPU.
-		Expect(it.Spec.CPU.String()).To(Equal("30"))
-		Expect(it.Spec.Memory.String()).To(Equal("240Gi"))
+		Expect(it.Spec.CPU.String()).To(Equal("60"))
+		Expect(it.Spec.Memory.String()).To(Equal("480Gi"))
 		Expect(it.Spec.NodeSelector).To(HaveKeyWithValue(naming.LabelGPUProduct, gpuProduct))
 		Eventually(func() int32 {
 			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(it), it)
 			return it.Status.Total
-		}, timeout, interval).Should(Equal(int32(8)))
-		Expect(it.Status.Free).To(Equal(int32(8)))
+		}, timeout, interval).Should(Equal(int32(4)))
+		Expect(it.Status.Free).To(Equal(int32(4)))
 
 		rf := &unstructured.Unstructured{}
 		rf.SetGroupVersionKind(kf.ResourceFlavorGVK)

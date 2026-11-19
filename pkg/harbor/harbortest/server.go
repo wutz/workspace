@@ -26,10 +26,11 @@ type Server struct {
 }
 
 type Robot struct {
-	ID        int64
-	Name      string
-	ProjectID int64
-	Secret    string
+	ID           int64
+	Name         string
+	ProjectID    int64
+	Secret       string
+	ReadProjects []string
 }
 
 type Art struct {
@@ -84,6 +85,29 @@ func (s *Server) RobotSecret(name string) string {
 		}
 	}
 	return ""
+}
+
+// RobotReadProjects returns extra read-only projects granted to a robot.
+func (s *Server) RobotReadProjects(name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rb := range s.Robots {
+		if rb.Name == name {
+			return append([]string(nil), rb.ReadProjects...)
+		}
+	}
+	return nil
+}
+
+// ProjectQuota returns the configured storage quota in bytes for a project.
+func (s *Server) ProjectQuota(name string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.Projects[name]
+	if !ok {
+		return 0
+	}
+	return s.Quotas[id]
 }
 
 // RemoveRobot deletes a robot by login name, as if it was removed in Harbor.
@@ -266,7 +290,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		project := in.Permissions[0].Namespace
-		rb := Robot{ID: s.id(), Name: "robot$" + project + "+" + in.Name, ProjectID: s.Projects[project], Secret: "initial"}
+		var readProjects []string
+		for _, perm := range in.Permissions[1:] {
+			readProjects = append(readProjects, perm.Namespace)
+		}
+		rb := Robot{
+			ID: s.id(), Name: "robot$" + project + "+" + in.Name, ProjectID: s.Projects[project],
+			Secret: "initial", ReadProjects: readProjects,
+		}
 		s.Robots[rb.ID] = rb
 		writeJSON(w, http.StatusCreated, map[string]any{"id": rb.ID, "name": rb.Name, "secret": rb.Secret})
 	case parts[0] == "robots" && len(parts) == 2 && r.Method == http.MethodPatch:

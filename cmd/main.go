@@ -73,6 +73,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableKueue bool
+	var enableInstanceTypeController bool
+	var enableResourcePoolController bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -95,6 +97,10 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableKueue, "enable-kueue", true,
 		"Maintain Kueue ClusterQueues, LocalQueues and ResourceFlavors when the Kueue API is installed.")
+	flag.BoolVar(&enableInstanceTypeController, "enable-instancetype-controller", true,
+		"Run the InstanceType controller that derives GPU and CPU instance catalogue entries from nodes.")
+	flag.BoolVar(&enableResourcePoolController, "enable-resourcepool-controller", true,
+		"Run the ResourcePool controller that manages physical node pools and pool-scoped ResourceFlavors.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -218,15 +224,26 @@ func main() {
 	if !kueue {
 		setupLog.Info("Kueue is not in use; ClusterQueues, LocalQueues and ResourceFlavors are not maintained")
 	}
-	for name, r := range map[string]interface{ SetupWithManager(ctrl.Manager) error }{
-		"instancetype": &controller.InstanceTypeReconciler{Client: mgr.GetClient(), Config: cfg, Kueue: kueue},
+	priorityClasses := kueue && workloadPriorityClassInstalled(mgr.GetRESTMapper())
+	reconcilers := map[string]interface{ SetupWithManager(ctrl.Manager) error }{
 		"project": &controller.ProjectReconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Config: cfg, Kueue: kueue,
 		},
 		"registry": &controller.RegistryReconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg, ConfigNamespace: platform.Namespace(),
 		},
-	} {
+	}
+	if enableResourcePoolController {
+		reconcilers["resourcepool"] = &controller.ResourcePoolReconciler{
+			Client: mgr.GetClient(), Config: cfg, Kueue: kueue, PriorityClasses: priorityClasses,
+		}
+	}
+	if enableInstanceTypeController {
+		reconcilers["instancetype"] = &controller.InstanceTypeReconciler{
+			Client: mgr.GetClient(), Config: cfg, Kueue: kueue,
+		}
+	}
+	for name, r := range reconcilers {
 		if err := r.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create controller", "controller", name)
 			os.Exit(1)
@@ -255,6 +272,15 @@ func kueueInstalled(m meta.RESTMapper) bool {
 	_, err := m.RESTMapping(schema.GroupKind{Group: "kueue.x-k8s.io", Kind: "ClusterQueue"}, "v1beta2")
 	if err != nil && !meta.IsNoMatchError(err) {
 		setupLog.Error(err, "Failed to look up the Kueue API")
+	}
+	return err == nil
+}
+
+// workloadPriorityClassInstalled reports whether Kueue WorkloadPriorityClass is served.
+func workloadPriorityClassInstalled(m meta.RESTMapper) bool {
+	_, err := m.RESTMapping(schema.GroupKind{Group: "kueue.x-k8s.io", Kind: "WorkloadPriorityClass"}, "v1beta2")
+	if err != nil && !meta.IsNoMatchError(err) {
+		setupLog.Error(err, "Failed to look up the Kueue WorkloadPriorityClass API")
 	}
 	return err == nil
 }

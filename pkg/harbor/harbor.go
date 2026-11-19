@@ -223,13 +223,34 @@ var robotAccess = [][2]string{
 	{"tag", "list"}, {"tag", "create"}, {"tag", "delete"},
 }
 
-// robotPermissions lets the robot push, pull, list and delete images.
-func robotPermissions(project string) []map[string]any {
+// robotReadAccess lets a robot pull and list images from shared base-image projects.
+var robotReadAccess = [][2]string{
+	{"repository", "pull"}, {"repository", "list"}, {"repository", "read"},
+	{"artifact", "list"}, {"artifact", "read"}, {"tag", "list"},
+}
+
+// robotPermissions lets the robot push, pull, list and delete images in its own
+// project and optionally pull from shared public base-image projects.
+func robotPermissions(project string, readProjects []string) []map[string]any {
 	access := make([]map[string]string, 0, len(robotAccess))
 	for _, ra := range robotAccess {
 		access = append(access, map[string]string{"resource": ra[0], "action": ra[1]})
 	}
-	return []map[string]any{{"kind": "project", "namespace": project, "access": access}}
+	perms := []map[string]any{{"kind": "project", "namespace": project, "access": access}}
+	if len(readProjects) == 0 {
+		return perms
+	}
+	readOnly := make([]map[string]string, 0, len(robotReadAccess))
+	for _, ra := range robotReadAccess {
+		readOnly = append(readOnly, map[string]string{"resource": ra[0], "action": ra[1]})
+	}
+	for _, rp := range readProjects {
+		if rp == "" || rp == project {
+			continue
+		}
+		perms = append(perms, map[string]any{"kind": "project", "namespace": rp, "access": readOnly})
+	}
+	return perms
 }
 
 func (c *Client) findRobot(ctx context.Context, p *Project, name string) (*Robot, error) {
@@ -262,11 +283,17 @@ func (c *Client) HasRobot(ctx context.Context, p *Project, name string) (bool, e
 // returns its login name. Harbor only reveals robot secrets on creation, so
 // the caller generates the secret and stores it.
 func (c *Client) EnsureRobot(ctx context.Context, p *Project, name, secret string) (string, error) {
+	return c.EnsureRobotWithReadProjects(ctx, p, name, secret, nil)
+}
+
+// EnsureRobotWithReadProjects creates (or resets) the project robot with push/pull
+// access to p and read-only pull access to any extra shared base-image projects.
+func (c *Client) EnsureRobotWithReadProjects(ctx context.Context, p *Project, name, secret string, readProjects []string) (string, error) {
 	r, err := c.findRobot(ctx, p, name)
 	if errors.Is(err, ErrNotFound) {
 		in := map[string]any{
 			"name": name, "level": "project", "duration": -1, "disable": false,
-			"description": "project push/pull robot", "permissions": robotPermissions(p.Name),
+			"description": "project push/pull robot", "permissions": robotPermissions(p.Name, readProjects),
 		}
 		var out struct {
 			ID   int64  `json:"id"`

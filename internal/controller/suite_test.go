@@ -127,6 +127,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	loader := &platform.Loader{Reader: mgr.GetAPIReader(), Namespace: configNamespace}
 	for _, r := range []interface{ SetupWithManager(ctrl.Manager) error }{
+		&ResourcePoolReconciler{Client: mgr.GetClient(), Config: loader, Kueue: true, PriorityClasses: true},
 		&InstanceTypeReconciler{Client: mgr.GetClient(), Config: loader, Kueue: true},
 		&ProjectReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Config: loader, Kueue: true},
 		&RegistryReconciler{

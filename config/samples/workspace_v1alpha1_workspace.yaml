@@ -4,20 +4,49 @@ metadata:
   name: demo
 spec:
   displayName: Demo project
-  quota:
+  poolQuotas:
+  - pool: llm-exclusive
     gpus:
-    - class: rtx-5090
+    - class: h100-80gb
+      count: 16
+  - pool: dev-shared
+    maxSandboxes: 8
+  spot:
+    enabled: true
+    gpus:
+    - class: h100-80gb
       count: 8
-    storage: 1Ti
-    volumes: 10
+    maxQueueDuration: 4h
+    maxRequeueCount: 2
+  quota:
+    storage: 2Ti
+    volumes: 20
     registryStorage: 200Gi
+    storageClasses:
+    - storageClassName: ceph-fs
+      storage: 1Ti
+      volumes: 5
+    extendedResources:
+      rdma/rdma_shared_device_a: "16"
+  sharedVolume:
+    enabled: true
+    size: 500Gi
+    storageClassName: ceph-fs
+  publicDatasets:
+  - name: imagenet-1k
   network:
     isolation: Isolated
-    denyInternet: false
+    denyInternet: true
   members:
   - name: alice
-    role: edit
+    role: admin
   - name: bob
+    role: edit
+  - kind: User
+    name: carol@example.com
     role: view
+  - kind: Group
+    name: ml-researchers
+    role: edit
   trashRetention: 168h
   deletionPolicy: Retain

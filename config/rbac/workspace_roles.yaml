@@ -1,14 +1,49 @@
-# Roles bound by the operator for Project members. Members are ServiceAccounts
-# in project-members; "edit" or "view" is bound in the project namespace. The
-# operator also creates project:project:<name>, granting members read access
-# to their Project, its ClusterQueue, InstanceTypes and ClusterTrainingRuntimes.
+# Roles bound by the operator for Project members. Members can be
+# ServiceAccounts in project-members or external OIDC Users/Groups; "admin",
+# "edit" or "view" is bound in the project namespace. The operator also creates
+# project:project:<name>, granting members read access to their Project, its
+# ClusterQueues, authorized ResourcePools, InstanceTypes and
+# ClusterTrainingRuntimes.
 #
-# workspace-edit and workspace-view aggregate every ClusterRole labelled
-# workspace.wutz.dev/aggregate-to-member=<role>. The rules here cover the
-# third-party APIs the platform workloads use; a platform adds the rules for its
-# own kinds with its own labelled ClusterRoles.
+# workspace-admin, workspace-edit and workspace-view aggregate every ClusterRole
+# labelled workspace.wutz.dev/aggregate-to-member=<role>. The rules here cover
+# the third-party APIs the platform workloads use; a platform adds the rules for
+# its own kinds with its own labelled ClusterRoles.
 #
 # Members cannot change quotas, network policies, RBAC or namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-admin
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      workspace.wutz.dev/aggregate-to-member: admin
+  - matchLabels:
+      workspace.wutz.dev/aggregate-to-member: edit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: project-member-admin
+  labels:
+    workspace.wutz.dev/aggregate-to-member: admin
+rules:
+# Project maintainers can manage project-scoped workloads, configs, and user secrets,
+# without mutating platform-enforced quotas, network policies, or RBAC bindings.
+- apiGroups: [""]
+  resources: [configmaps, secrets, services]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [delete]
+- apiGroups: [batch]
+  resources: [jobs]
+  verbs: [create, update, patch, delete]
+- apiGroups: [jobset.x-k8s.io]
+  resources: [jobsets]
+  verbs: [create, update, patch, delete]
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -36,9 +71,10 @@ rules:
   resources: [pods/exec]
   verbs: [create]
 - apiGroups: [""]
-  # Registry robot credentials.
+  # Registry robot credentials only; isolates other project Secrets from edit members.
   resources: [secrets]
-  verbs: [get, list, watch]
+  resourceNames: [workspace-registry]
+  verbs: [get]
 - apiGroups: [events.k8s.io]
   resources: [events]
   verbs: [get, list, watch]

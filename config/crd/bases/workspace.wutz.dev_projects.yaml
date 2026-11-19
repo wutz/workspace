@@ -74,26 +74,40 @@ spec:
               members:
                 items:
                   description: |-
-                    Member is a user of the project. Each member gets a ServiceAccount in the
-                    platform members namespace and a token that the admin exports as a kubeconfig.
+                    Member is a user or group of the project. ServiceAccount members get a
+                    ServiceAccount in the platform members namespace and a token that the admin
+                    exports as a kubeconfig. User and Group members bind directly to OIDC subjects.
                   properties:
+                    kind:
+                      default: ServiceAccount
+                      description: kind selects ServiceAccount (default), User, or
+                        Group.
+                      enum:
+                      - ServiceAccount
+                      - User
+                      - Group
+                      type: string
                     name:
-                      description: name identifies the member within the project.
-                      maxLength: 40
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      description: name identifies the member within the project (or
+                        the OIDC User/Group subject name).
+                      maxLength: 128
+                      minLength: 1
                       type: string
                     role:
                       default: edit
-                      description: |-
-                        MemberRole is the access level of a project member. Members are managed by
-                        platform admins through the Project, so there is no project admin role.
+                      description: MemberRole is the access level of a project member.
                       enum:
+                      - admin
                       - edit
                       - view
                       type: string
                   required:
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: ServiceAccount member name must be at most 40 characters
+                    rule: '!has(self.kind) || self.kind != ''ServiceAccount'' || size(self.name)
+                      <= 40'
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -103,7 +117,7 @@ spec:
                 properties:
                   denyInternet:
                     description: denyInternet blocks egress outside the project (DNS
-                      stays allowed).
+                      and platform internal allowlists stay allowed).
                     type: boolean
                   isolation:
                     default: Isolated
@@ -113,15 +127,112 @@ spec:
                     - None
                     type: string
                 type: object
+              poolQuotas:
+                description: |-
+                  poolQuotas binds this project to one or more ResourcePools with pool-scoped quotas.
+                  When empty, quota.gpus applies to the built-in default pool for backward compatibility.
+                items:
+                  description: PoolQuota binds a Project to a specific ResourcePool
+                    with pool-scoped limits.
+                  properties:
+                    borrowingLimit:
+                      description: borrowingLimit limits how many extra GPUs this
+                        Project may borrow from the pool's Cohort.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    gpus:
+                      description: gpus is the GPU quota per GPU class for an Exclusive
+                        pool.
+                      items:
+                        description: GPUQuota is the number of GPUs of one class a
+                          project may run at once.
+                        properties:
+                          class:
+                            description: class is the InstanceType GPU class, e.g.
+                              rtx-5090.
+                            minLength: 1
+                            type: string
+                          count:
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        required:
+                        - class
+                        - count
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - class
+                      x-kubernetes-list-type: map
+                    lendingLimit:
+                      description: lendingLimit limits how many unused nominal GPUs
+                        this Project may lend within the pool's Cohort.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxSandboxes:
+                      description: maxSandboxes is the maximum concurrent shared sandboxes
+                        in a Shared pool.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    pool:
+                      description: pool is the ResourcePool name (e.g. default, llm-exclusive,
+                        dev-shared).
+                      minLength: 1
+                      type: string
+                  required:
+                  - pool
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - pool
+                x-kubernetes-list-type: map
+              publicDatasets:
+                description: publicDatasets lists platform-defined read-only datasets
+                  projected into the project namespace.
+                items:
+                  description: |-
+                    PublicDatasetRef projects a platform-defined read-only dataset or base model
+                    volume descriptor into the project namespace.
+                  properties:
+                    mountPath:
+                      description: mountPath is an optional preferred mount path hint
+                        for workloads.
+                      type: string
+                    name:
+                      description: name is the platform dataset name defined in workspace-platform
+                        config.
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               quota:
                 description: |-
                   ProjectQuota limits what a project may run and store. Unset fields take the
                   platform defaults.
                 properties:
+                  extendedResources:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: extendedResources sets explicit quotas on extra hardware
+                      resources (e.g. rdma/roce_gids).
+                    type: object
                   gpus:
                     description: |-
-                      gpus is the GPU quota per GPU class. CPU and memory quotas follow from the
-                      per-GPU slice of each class. Jobs over quota wait in the queue.
+                      gpus is the GPU quota per GPU class in the default ResourcePool when
+                      poolQuotas is unset. CPU and memory quotas follow from the per-GPU slice
+                      of each class. Jobs over quota wait in the queue.
                     items:
                       description: GPUQuota is the number of GPUs of one class a project
                         may run at once.
@@ -151,7 +262,7 @@ spec:
                     - type: integer
                     - type: string
                     description: registryStorage is the Harbor project storage quota;
-                      empty is unlimited.
+                      unset uses platform default (unlimited if unset there).
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   storage:
@@ -161,11 +272,112 @@ spec:
                     description: storage is the total requested size of all volumes.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  storageClasses:
+                    description: storageClasses limits capacity and PVC count per
+                      StorageClass.
+                    items:
+                      description: StorageClassQuota limits storage capacity and PVC
+                        count for one StorageClass.
+                      properties:
+                        storage:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: storage is the total requested capacity for
+                            PVCs using this StorageClass.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        storageClassName:
+                          description: storageClassName is the Kubernetes StorageClass
+                            name.
+                          minLength: 1
+                          type: string
+                        volumes:
+                          description: volumes is the maximum number of PVCs using
+                            this StorageClass.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - storageClassName
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - storageClassName
+                    x-kubernetes-list-type: map
                   volumes:
                     description: volumes is the maximum number of volumes (PVCs).
                     format: int32
                     type: integer
                 type: object
+              sharedVolume:
+                description: sharedVolume configures the default RWX shared PersistentVolumeClaim
+                  in the project namespace.
+                properties:
+                  enabled:
+                    description: enabled overrides the platform default for provisioning
+                      the workspace-shared PVC.
+                    type: boolean
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: size overrides the platform default shared volume
+                      size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: storageClassName overrides the platform default RWX
+                      StorageClass.
+                    type: string
+                type: object
+              spot:
+                description: spot enables preemptible Spot workloads borrowing idle
+                  capacity from lending Exclusive pools.
+                properties:
+                  enabled:
+                    description: enabled allows members to submit workloads to the
+                      project's spot LocalQueue.
+                    type: boolean
+                  gpus:
+                    description: gpus sets the maximum concurrent Spot GPUs per GPU
+                      class.
+                    items:
+                      description: GPUQuota is the number of GPUs of one class a project
+                        may run at once.
+                      properties:
+                        class:
+                          description: class is the InstanceType GPU class, e.g. rtx-5090.
+                          minLength: 1
+                          type: string
+                        count:
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - class
+                      - count
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - class
+                    x-kubernetes-list-type: map
+                  maxQueueDuration:
+                    description: maxQueueDuration is the maximum waiting duration
+                      for a single Spot queueing attempt (1h to 12h).
+                    type: string
+                  maxRequeueCount:
+                    description: maxRequeueCount limits how many times a preempted
+                      or starved Spot workload may re-enter the queue (0 to 3).
+                    format: int32
+                    maximum: 3
+                    minimum: 0
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: spot.maxQueueDuration must be between 1h and 12h
+                  rule: '!has(self.maxQueueDuration) || (duration(self.maxQueueDuration)
+                    >= duration(''1h'') && duration(self.maxQueueDuration) <= duration(''12h''))'
               trashRetention:
                 description: |-
                   trashRetention is how long deleted volumes are kept before they are
@@ -176,8 +388,8 @@ spec:
             description: status defines the observed state of Project
             properties:
               clusterQueue:
-                description: clusterQueue is the Kueue ClusterQueue enforcing the
-                  GPU quota.
+                description: clusterQueue is the default Kueue ClusterQueue enforcing
+                  the GPU quota.
                 type: string
               conditions:
                 items:
@@ -238,31 +450,43 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              datasets:
+                description: datasets lists the public dataset descriptors projected
+                  into this project.
+                items:
+                  type: string
+                type: array
               localQueue:
-                description: localQueue is the queue jobs in the namespace submit
-                  to.
+                description: localQueue is the default queue jobs in the namespace
+                  submit to.
                 type: string
               members:
                 items:
-                  description: MemberStatus reports the credentials of a member.
+                  description: MemberStatus reports the credentials or subject binding
+                    of a member.
                   properties:
+                    kind:
+                      description: kind is ServiceAccount, User or Group.
+                      enum:
+                      - ServiceAccount
+                      - User
+                      - Group
+                      type: string
                     name:
                       type: string
                     namespace:
                       description: namespace of the ServiceAccount (the platform members
-                        namespace).
+                        namespace; empty for User/Group).
                       type: string
                     serviceAccount:
-                      description: serviceAccount of the member.
+                      description: serviceAccount of the member (empty for User/Group).
                       type: string
                     tokenSecret:
-                      description: tokenSecret holds the long-lived token (kubernetes.io/service-account-token).
+                      description: tokenSecret holds the long-lived token (kubernetes.io/service-account-token;
+                        empty for User/Group).
                       type: string
                   required:
                   - name
-                  - namespace
-                  - serviceAccount
-                  - tokenSecret
                   type: object
                 type: array
               namespace:
@@ -271,6 +495,51 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              queues:
+                description: queues lists all Kueue LocalQueues provisioned for this
+                  project (per pool and spot).
+                items:
+                  description: QueueStatus reports one Kueue LocalQueue available
+                    inside the project namespace.
+                  properties:
+                    allowedWorkloads:
+                      description: allowedWorkloads lists permitted workload kinds
+                        on this queue.
+                      items:
+                        description: WorkloadKind identifies a category of AI workload
+                          permitted on a ResourcePool.
+                        enum:
+                        - Sandbox
+                        - TrainJob
+                        - Inference
+                        type: string
+                      type: array
+                    clusterQueue:
+                      description: clusterQueue is the backing Kueue ClusterQueue
+                        name.
+                      type: string
+                    mode:
+                      description: mode is Exclusive or Shared.
+                      enum:
+                      - Exclusive
+                      - Shared
+                      type: string
+                    name:
+                      description: name is the LocalQueue name inside the project
+                        namespace.
+                      type: string
+                    pool:
+                      description: pool is the backing ResourcePool name (empty for
+                        cross-pool Spot queue).
+                      type: string
+                    spot:
+                      description: spot marks a preemptible Spot queue.
+                      type: boolean
+                  required:
+                  - clusterQueue
+                  - name
+                  type: object
+                type: array
               registry:
                 description: RegistryStatus reports the Harbor project of a project.
                 properties:
@@ -285,6 +554,10 @@ spec:
                     description: url is the push prefix, e.g. cr.example.com:7443/project-foo.
                     type: string
                 type: object
+              sharedVolume:
+                description: sharedVolume is the name of the provisioned RWX shared
+                  PVC, if enabled.
+                type: string
             type: object
         required:
         - spec

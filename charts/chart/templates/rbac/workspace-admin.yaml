@@ -1,0 +1,59 @@
+# Project maintainer role bound in the project namespace. The operator binds it
+# by name, so it is not prefixed with the release name. It aggregates every
+# ClusterRole labelled workspace.wutz.dev/aggregate-to-member=admin or edit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-admin
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      workspace.wutz.dev/aggregate-to-member: admin
+  - matchLabels:
+      workspace.wutz.dev/aggregate-to-member: edit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: project-member-admin
+  labels:
+    workspace.wutz.dev/aggregate-to-member: admin
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - jobset.x-k8s.io
+  resources:
+  - jobsets
+  verbs:
+  - create
+  - update
+  - patch
+  - delete
